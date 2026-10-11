@@ -3,13 +3,15 @@
   --accent: #2563eb; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #111418; --panel: #1b2027; --text: #e5e7eb; --muted: #9ca3af; --line: #2d343d;
-          --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+  :root:not([data-theme="light"]) { --bg: #111418; --panel: #1b2027; --text: #e5e7eb; --muted: #9ca3af; --line: #2d343d;
+          --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; color-scheme: dark; }
 }
+:root[data-theme="dark"] { --bg: #111418; --panel: #1b2027; --text: #e5e7eb; --muted: #9ca3af; --line: #2d343d;
+        --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; color-scheme: dark; }
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
-header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel);
-         border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+header { position: sticky; top: env(safe-area-inset-top, 0px); display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel);
+         border-bottom: 1px solid var(--line); z-index: 5; flex-wrap: wrap; }
 h1 { font-size: 16px; margin: 0; }
 h2 { font-size: 15px; margin: 0 0 10px; }
 nav { display: flex; gap: 4px; flex-wrap: wrap; }
@@ -69,7 +71,17 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 #dialog-body { padding: 16px; display: flex; flex-direction: column; gap: 10px; max-height: 85vh; overflow: auto; }
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
          padding: 8px 14px; border-radius: 6px; display: none; z-index: 20; max-width: 90vw; }
-@media (max-width: 640px) { main { padding: 10px; } .board { grid-auto-columns: 85vw; } }
+.panel { overflow-x: auto; }
+#confirm { width: min(420px, 92vw); }
+.confirm-body { padding: 16px; }
+.confirm-body p { margin: 0 0 14px; }
+@media (max-width: 640px) {
+  header { gap: 8px; }
+  nav { overflow-x: auto; flex-wrap: nowrap; width: 100%; }
+  nav button { white-space: nowrap; }
+  .board { grid-auto-columns: 82vw; }
+  .live { position: absolute; top: 12px; right: 16px; }
+}
 
 .unfav { color: var(--bad); font-variant-numeric: tabular-nums; }
 .fav { color: var(--ok); font-variant-numeric: tabular-nums; }

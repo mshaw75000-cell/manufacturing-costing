@@ -69,6 +69,15 @@ whole cycle without touching your tenant. Demo walk-through:
 6. *Business Central*: **Send pending postings**, then **Pull items & stock** to
    see BC's inventory and cost updated.
 
+## Phone / no-install demo
+
+`python demo/build.py` builds `demo/phone-demo.html`, a single page that runs
+the same UI with an in-browser port of the server logic (`demo/mockserver.js`)
+on sample data and a simulated BC. Open it on any phone or browser, no server
+needed. Data is kept in that browser; **Reset demo data** starts over. The
+Python app in `app/` is the real implementation, so keep `mockserver.js` in
+step when its behaviour changes.
+
 ## Connecting to the real Business Central
 
 Set `BC_MODE=live` and the following (see `.env.example`):

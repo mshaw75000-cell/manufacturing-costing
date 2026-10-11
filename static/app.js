@@ -62,6 +62,20 @@ function openDialog(html, bind) {
 }
 function closeDialog() { dlg.close(); }
 
+// In-page confirmation (works on tablets and inside embedded views where confirm() is blocked).
+function askConfirm(message, okLabel = 'OK') {
+  const box = $('#confirm');
+  $('#confirm-msg').textContent = message;
+  $('#confirm-ok').textContent = okLabel;
+  return new Promise(resolve => {
+    const done = v => { box.close(); resolve(v); };
+    $('#confirm-ok').onclick = () => done(true);
+    $('#confirm-cancel').onclick = () => done(false);
+    box.oncancel = e => { e.preventDefault(); done(false); };
+    box.showModal();
+  });
+}
+
 // ---------------------------------------------------------------- live updates
 let refreshTimer;
 function connectStream() {
@@ -409,7 +423,7 @@ async function moveDialog(jobId, opId) {
       try {
         await post(`/jobs/${jobId}/${path}`, { operation_id: opId, operator: operator(), ...body });
       } catch (e) {
-        if (e.detail?.shortages && confirm(`${e.message}\n\nStart anyway? Stock will go negative.`)) {
+        if (e.detail?.shortages && await askConfirm(`${e.message}. Start anyway? Stock will go negative.`, 'Start anyway')) {
           await post(`/jobs/${jobId}/${path}`, { operation_id: opId, operator: operator(), ...body, force: true });
         } else throw e;
       }
@@ -479,8 +493,8 @@ async function jobDialog(jobId) {
   });
 }
 
-function finishJob(jobId) {
-  if (!confirm('Close this job? Actual cost and variances are frozen. Any units still waiting at a stage are closed short.')) return;
+async function finishJob(jobId) {
+  if (!await askConfirm('Close this job? Actual cost and variances are frozen. Any units still waiting at a stage are closed short.', 'Close job')) return;
   guarded(async () => {
     const j = await post(`/jobs/${jobId}/finish?operator=${encodeURIComponent(operator())}`);
     toast(`${j.number} closed: ${num(j.qty_good)} good, actual ${money(j.costs.unit_cost)}/unit, variance ${money(j.costs.variance.total)}`);
