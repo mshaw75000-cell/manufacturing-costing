@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manufacturing Costing</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Manufacturing Costing</h1>
+    <nav id="tabs">
+      <button data-view="floor" class="active">Shop floor</button>
+      <button data-view="plan">Demand &amp; plan</button>
+      <button data-view="jobs">Jobs</button>
+      <button data-view="recipes">Recipes</button>
+      <button data-view="items">Items</button>
+      <button data-view="bc">Business Central</button>
+    </nav>
+    <span id="live" class="live" title="Live updates">● live</span>
+  </header>
+  <main id="view"></main>
+  <dialog id="dialog"><form method="dialog" id="dialog-body"></form></dialog>
+  <div id="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
