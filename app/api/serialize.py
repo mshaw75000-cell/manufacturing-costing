@@ -5,12 +5,13 @@ from ..services.costing import job_costs, standard_unit_cost
 def item(i: Item) -> dict:
     return {"id": i.id, "no": i.no, "description": i.description, "item_type": i.item_type,
             "uom": i.uom, "unit_cost": i.unit_cost, "qty_on_hand": i.qty_on_hand,
-            "lot_tracked": i.lot_tracked, "bc_synced_at": i.bc_synced_at}
+            "lot_tracked": i.lot_tracked, "vendor_no": i.vendor_no, "vendor_name": i.vendor_name,
+            "lead_time_days": i.lead_time_days, "bc_synced_at": i.bc_synced_at}
 
 
 def stage(s: Stage) -> dict:
     return {"id": s.id, "code": s.code, "name": s.name, "sequence": s.sequence,
-            "rate_per_hour": s.rate_per_hour, "color": s.color}
+            "rate_per_hour": s.rate_per_hour, "capacity_hours_per_day": s.capacity_hours_per_day, "color": s.color}
 
 
 def recipe(r: Recipe, active: dict[int, Recipe] | None = None) -> dict:
@@ -32,7 +33,7 @@ def recipe(r: Recipe, active: dict[int, Recipe] | None = None) -> dict:
 
 def demand(d: Demand) -> dict:
     return {"id": d.id, "item_id": d.item_id, "item_no": d.item.no, "description": d.item.description,
-            "qty": d.qty, "due_date": d.due_date, "source": d.source, "reference": d.reference,
+            "qty": d.qty, "due_date": d.due_date, "source": d.source, "reference": d.reference, "customer": d.customer,
             "status": d.status, "created_at": d.created_at}
 
 
@@ -67,3 +68,28 @@ def lot(l) -> dict:
             "cert_ref": l.cert_ref, "source": l.source, "job_id": l.job_id,
             "qty_received": l.qty_received, "qty_on_hand": l.qty_on_hand, "notes": l.notes,
             "created_at": l.created_at}
+
+
+def issue_log(i) -> dict:
+    return {"id": i.id, "number": i.number, "job_id": i.job_id, "job": i.job.number if i.job else None,
+            "item_no": i.job.item.no if i.job else None, "job_operation_id": i.job_operation_id,
+            "stage_id": i.stage_id, "stage": i.stage.name if i.stage else None, "category": i.category,
+            "severity": i.severity, "title": i.title, "detail": i.detail, "minutes_lost": i.minutes_lost,
+            "qty_affected": i.qty_affected, "operator": i.operator, "status": i.status,
+            "resolution": i.resolution, "created_at": i.created_at, "resolved_at": i.resolved_at}
+
+
+def note(n, stages: dict | None = None) -> dict:
+    return {"id": n.id, "job_id": n.job_id, "job_operation_id": n.job_operation_id, "stage_id": n.stage_id,
+            "stage": (stages or {}).get(n.stage_id), "note": n.note, "detail": n.detail,
+            "operator": n.operator, "created_at": n.created_at}
+
+
+def purchase_request(pr) -> dict:
+    lines = [{"id": l.id, "item_id": l.item_id, "item_no": l.item.no, "description": l.item.description,
+              "uom": l.item.uom, "qty": l.qty, "unit_cost": l.unit_cost, "value": round(l.qty * l.unit_cost, 2),
+              "needed_by": l.needed_by, "lot_tracked": l.item.lot_tracked} for l in pr.lines]
+    return {"id": pr.id, "number": pr.number, "vendor_no": pr.vendor_no, "vendor_name": pr.vendor_name,
+            "status": pr.status, "bc_po_no": pr.bc_po_no, "needed_by": pr.needed_by, "notes": pr.notes,
+            "created_by": pr.created_by, "created_at": pr.created_at, "sent_at": pr.sent_at,
+            "received_at": pr.received_at, "lines": lines, "value": round(sum(l["value"] for l in lines), 2)}

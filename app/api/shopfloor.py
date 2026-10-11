@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..events import broker
-from ..models import Item, Job, Stage, StageEvent
+from ..models import IssueLog, Item, Job, JobNote, Stage, StageEvent
 from ..services import production as P
 from ..services.costing import job_costs
 from . import serialize as S
@@ -88,7 +88,11 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
     out["events"] = [{"action": e.action, "qty": e.qty, "minutes": e.minutes, "operator": e.operator,
                       "note": e.note, "stage": stages.get(e.stage_id), "created_at": e.created_at}
                      for e in db.scalars(select(StageEvent).where(StageEvent.job_id == job_id)
-                                         .order_by(StageEvent.id.desc()))]
+                                         .order_by(StageEvent.created_at.desc(), StageEvent.id.desc()))]
+    out["notes"] = [S.note(n, stages) for n in db.scalars(
+        select(JobNote).where(JobNote.job_id == job_id).order_by(JobNote.created_at.desc(), JobNote.id.desc()))]
+    out["issue_logs"] = [S.issue_log(i) for i in db.scalars(
+        select(IssueLog).where(IssueLog.job_id == job_id).order_by(IssueLog.created_at.desc(), IssueLog.id.desc()))]
     return out
 
 
@@ -155,6 +159,12 @@ def wip(db: Session = Depends(get_db)):
     stages = list(db.scalars(select(Stage).order_by(Stage.sequence)))
     board = {s.id: {**S.stage(s), "queued": 0.0, "in_process": 0.0, "jobs": []} for s in stages}
     jobs = db.scalars(select(Job).where(Job.status.in_(("released", "in_progress")))).all()
+    open_issues: dict[int, int] = {}
+    for i in db.scalars(select(IssueLog).where(IssueLog.status == "open", IssueLog.job_operation_id.is_not(None))):
+        open_issues[i.job_operation_id] = open_issues.get(i.job_operation_id, 0) + 1
+    note_count: dict[int, int] = {}
+    for n in db.scalars(select(JobNote).where(JobNote.job_id.in_([j.id for j in jobs]))):
+        note_count[n.job_id] = note_count.get(n.job_id, 0) + 1
     for job in jobs:
         issued_by_op: dict[int, list] = {}
         for i in job.issues:
@@ -179,6 +189,7 @@ def wip(db: Session = Depends(get_db)):
                 "qty_queued": op.qty_queued, "qty_in_process": op.qty_in_process,
                 "qty_done": op.qty_done, "qty_scrap": op.qty_scrap,
                 "materials": list(materials.values()),
+                "open_issues": open_issues.get(op.id, 0), "notes": note_count.get(job.id, 0),
             })
     # Every unit is through (done or scrapped): ready to close and freeze costs.
     finished = [{"job_id": j.id, "number": j.number, "item_no": j.item.no, "qty_good": j.qty_good,
@@ -204,7 +215,7 @@ def recent_events(limit: int = 50, db: Session = Depends(get_db)):
     stages = {s.id: s.name for s in db.scalars(select(Stage))}
     jobs = {}
     out = []
-    for e in db.scalars(select(StageEvent).order_by(StageEvent.id.desc()).limit(limit)):
+    for e in db.scalars(select(StageEvent).order_by(StageEvent.created_at.desc(), StageEvent.id.desc()).limit(limit)):
         if e.job_id not in jobs:
             jobs[e.job_id] = db.get(Job, e.job_id)
         j = jobs[e.job_id]

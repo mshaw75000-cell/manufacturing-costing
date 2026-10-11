@@ -1,7 +1,10 @@
-"""Demo data: stages, items pulled from the (mock) BC, a two-level recipe and BC demand.
+"""Demo data.
 
-    python -m app.seed
+    python -m app.seed           small starter set: two recipes and one BC order (used by tests)
+    python -m app.seed --trial   full trial dataset: 10 weeks of history, 20 open jobs (see trial_data.py)
 """
+import sys
+
 from sqlalchemy import select
 
 from .bc.sync import get_bc, sync_demand, sync_items
@@ -68,5 +71,18 @@ def seed():
         db.close()
 
 
+def seed_trial():
+    from .trial_data import build_trial
+    Base.metadata.create_all(engine)
+    db = SessionLocal()
+    try:
+        if db.scalar(select(Stage)):
+            print("Database already has data; delete mfgcost.db (and bc_mock.json) first")
+            return
+        print("Trial data:", build_trial(db, get_bc()))
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
-    seed()
+    seed_trial() if "--trial" in sys.argv else seed()

@@ -49,6 +49,8 @@ def sync_items(db: Session, bc: BusinessCentral) -> dict:
             updated += 1
         item.description = bi.description
         item.uom = bi.uom
+        if bi.vendor_no:
+            item.vendor_no, item.vendor_name, item.lead_time_days = bi.vendor_no, bi.vendor_name, bi.lead_time_days
         if bi.unit_cost or not item.unit_cost:
             item.unit_cost = bi.unit_cost
         item.qty_on_hand = bi.inventory + pending.get(bi.no, 0.0)
@@ -76,9 +78,11 @@ def sync_demand(db: Session, bc: BusinessCentral) -> dict:
         if d:
             if d.status == "open":
                 d.qty, d.due_date, d.item_id = line.qty, due, item.id
+                d.customer = line.customer or d.customer
                 updated += 1
         else:
-            db.add(Demand(item_id=item.id, qty=line.qty, due_date=due, source="bc", reference=line.reference))
+            db.add(Demand(item_id=item.id, qty=line.qty, due_date=due, source="bc", reference=line.reference,
+                          customer=line.customer))
             created += 1
     # Lines that disappeared from BC (shipped / deleted) are no longer demand.
     closed = 0

@@ -8,14 +8,22 @@ there, which is what drives the real-time shop-floor board.
 """
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from . import clock
 from .db import Base
 
 
 def utcnow():
-    return datetime.now(timezone.utc)
+    return clock.now()
+
+
+@event.listens_for(Base, "init", propagate=True)
+def _stamp_created_at(target, args, kwargs):
+    """Timestamp records when they're created, not when they're flushed."""
+    if "created_at" in type(target).__dict__ and kwargs.get("created_at") is None:
+        target.created_at = utcnow()
 
 
 class Item(Base):
@@ -30,6 +38,10 @@ class Item(Base):
     # Raw material whose lots / heat numbers must be recorded on receipt and consumption.
     # Made items (sub-assemblies, finished goods) always get an output lot per job.
     lot_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Purchasing defaults for raw material (BC's API v2.0 items don't expose a vendor).
+    vendor_no: Mapped[str] = mapped_column(String(30), default="")
+    vendor_name: Mapped[str] = mapped_column(String(100), default="")
+    lead_time_days: Mapped[int] = mapped_column(Integer, default=7)
     qty_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
     bc_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -41,6 +53,8 @@ class Stage(Base):
     name: Mapped[str] = mapped_column(String(100))
     sequence: Mapped[int] = mapped_column(Integer, default=10)
     rate_per_hour: Mapped[float] = mapped_column(Float, default=0.0)  # labour + overhead
+    # Available hours per working day (shifts x machines/people), for OEE and loading.
+    capacity_hours_per_day: Mapped[float] = mapped_column(Float, default=7.6)
     color: Mapped[str] = mapped_column(String(20), default="#64748b")
 
 
@@ -95,6 +109,7 @@ class Demand(Base):
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     source: Mapped[str] = mapped_column(String(20), default="manual")  # manual | bc
     reference: Mapped[str] = mapped_column(String(100), default="")
+    customer: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[str] = mapped_column(String(20), default="open")  # open | completed | cancelled
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -225,3 +240,76 @@ class BcPosting(Base):
     response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IssueLog(Base):
+    """Something that went wrong on the floor: a breakdown, a quality defect,
+    a material problem. Downtime minutes feed OEE availability."""
+    __tablename__ = "issue_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    number: Mapped[str] = mapped_column(String(20), unique=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True)
+    job_operation_id: Mapped[int | None] = mapped_column(ForeignKey("job_operations.id"), nullable=True)
+    stage_id: Mapped[int | None] = mapped_column(ForeignKey("stages.id"), nullable=True)
+    # breakdown | changeover | material | quality | safety | waiting | other
+    category: Mapped[str] = mapped_column(String(20), default="other")
+    severity: Mapped[str] = mapped_column(String(10), default="medium")  # low | medium | high
+    title: Mapped[str] = mapped_column(String(200))
+    detail: Mapped[str] = mapped_column(Text, default="")
+    minutes_lost: Mapped[float] = mapped_column(Float, default=0.0)
+    qty_affected: Mapped[float] = mapped_column(Float, default=0.0)
+    operator: Mapped[str] = mapped_column(String(100), default="")
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open | resolved
+    resolution: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    job: Mapped["Job | None"] = relationship()
+    stage: Mapped["Stage | None"] = relationship()
+
+
+class JobNote(Base):
+    """Operator note on a job (optionally at one stage): a short note plus optional detail."""
+    __tablename__ = "job_notes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    job_operation_id: Mapped[int | None] = mapped_column(ForeignKey("job_operations.id"), nullable=True)
+    stage_id: Mapped[int | None] = mapped_column(ForeignKey("stages.id"), nullable=True)
+    note: Mapped[str] = mapped_column(String(300))
+    detail: Mapped[str] = mapped_column(Text, default="")
+    operator: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PurchaseRequest(Base):
+    """Request to buy raw material for a shortfall. Sending it creates a
+    purchase order in BC; receipt then happens in BC and flows back in when
+    stock is pulled."""
+    __tablename__ = "purchase_requests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    number: Mapped[str] = mapped_column(String(20), unique=True)
+    vendor_no: Mapped[str] = mapped_column(String(30), default="")
+    vendor_name: Mapped[str] = mapped_column(String(100), default="")
+    # draft | sent (PO created in BC) | received | cancelled
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    bc_po_no: Mapped[str] = mapped_column(String(30), default="")
+    needed_by: Mapped[date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    lines: Mapped[list["PurchaseRequestLine"]] = relationship(cascade="all, delete-orphan")
+
+
+class PurchaseRequestLine(Base):
+    __tablename__ = "purchase_request_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(ForeignKey("purchase_requests.id", ondelete="CASCADE"))
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    qty: Mapped[float] = mapped_column(Float)
+    unit_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    needed_by: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    item: Mapped[Item] = relationship()

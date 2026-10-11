@@ -43,7 +43,7 @@ def update_item(item_id: int, body: dict, db: Session = Depends(get_db)):
     item = db.get(Item, item_id)
     if not item:
         _404()
-    for k in ("description", "item_type", "uom", "unit_cost", "lot_tracked"):
+    for k in ("description", "item_type", "uom", "unit_cost", "lot_tracked", "vendor_no", "vendor_name", "lead_time_days"):
         if k in body:
             setattr(item, k, body[k])
     db.commit()
@@ -55,6 +55,7 @@ class StageIn(BaseModel):
     name: str
     sequence: int = 10
     rate_per_hour: float = 0.0
+    capacity_hours_per_day: float = 7.6
     color: str = "#64748b"
 
 
@@ -76,7 +77,7 @@ def update_stage(stage_id: int, body: dict, db: Session = Depends(get_db)):
     s = db.get(Stage, stage_id)
     if not s:
         _404()
-    for k in ("name", "sequence", "rate_per_hour", "color"):
+    for k in ("name", "sequence", "rate_per_hour", "capacity_hours_per_day", "color"):
         if k in body:
             setattr(s, k, body[k])
     db.commit()

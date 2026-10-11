@@ -108,13 +108,16 @@ def start(db: Session, job: Job, op_id: int, qty: float, operator: str = "", for
 
     op.qty_queued -= qty
     op.qty_in_process += qty
+    setup = 0.0
     if op.started_at is None:
         op.started_at = utcnow()
-        op.actual_minutes += op.setup_minutes
+        setup = op.setup_minutes
+        op.actual_minutes += setup
     job.status = "in_progress"
     for comp, q in needs:
         issue_material(db, job, comp.item, q, op, operator, (lot_choices or {}).get(comp.item_id))
-    _log(db, job, op, "start", qty, operator=operator)
+    # minutes on a start event = setup time, so reports can bucket all stage time by date
+    _log(db, job, op, "start", qty, minutes=setup, operator=operator)
 
 
 def allocate_lots(db: Session, item, qty: float, preferred_lot_id: int | None = None):

@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .api import bc, lots, master, planning, shopfloor
+from .api import bc, lots, master, ops, planning, purchasing, shopfloor
 from .db import Base, engine
 from .events import broker
 
@@ -20,6 +20,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Manufacturing Costing", lifespan=lifespan)
-for r in (master.router, planning.router, shopfloor.router, lots.router, bc.router):
+for r in (master.router, planning.router, shopfloor.router, lots.router, ops.router,
+          purchasing.router, bc.router):
     app.include_router(r)
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")

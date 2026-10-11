@@ -112,6 +112,9 @@ const views = {
                   <div class="row"><b>${esc(j.number)}</b><span class="spacer"></span>
                     <span class="small muted">${j.due_date ? 'due ' + esc(j.due_date) : ''}</span></div>
                   <div class="small">${esc(j.item_no)} · ${esc(j.description)}</div>
+                  ${j.open_issues || j.notes ? `<div class="badges">
+                    ${j.open_issues ? `<span class="badge bad">⚠ ${j.open_issues} open issue${j.open_issues > 1 ? 's' : ''}</span>` : ''}
+                    ${j.notes ? `<span class="badge">✎ ${j.notes} note${j.notes > 1 ? 's' : ''}</span>` : ''}</div>` : ''}
                   <div class="qty">
                     <div class="wait"><b>${num(j.qty_queued)}</b>waiting</div>
                     <div class="proc"><b>${num(j.qty_in_process)}</b>in process</div>
@@ -160,17 +163,18 @@ const views = {
           <label>Reference<input name="reference" placeholder="optional"></label>
           <button class="btn primary" style="align-self:flex-end">Add manual demand</button>
         </form>
-        <table><tr><th>Source</th><th>Reference</th><th>Item</th><th class="n">Qty</th><th>Due</th><th></th></tr>
-          ${demand.map(d => `<tr><td>${tag(d.source)}</td><td>${esc(d.reference)}</td>
+        <table><tr><th>Source</th><th>Reference</th><th>Customer</th><th>Item</th><th class="n">Qty</th><th>Due</th><th></th></tr>
+          ${demand.map(d => `<tr><td>${tag(d.source)}</td><td>${esc(d.reference)}</td><td>${esc(d.customer || '')}</td>
             <td>${esc(d.item_no)} <span class="muted">${esc(d.description)}</span></td>
             <td class="n">${num(d.qty)}</td><td>${esc(d.due_date || '')}</td>
             <td class="n"><button class="btn" data-job="${d.id}">Create job</button>
               ${d.source === 'manual' ? `<button class="btn" data-cancel="${d.id}">Cancel</button>` : ''}</td></tr>`).join('')
-            || '<tr><td colspan="6" class="muted">No open demand</td></tr>'}
+            || '<tr><td colspan="7" class="muted">No open demand</td></tr>'}
         </table>
       </div>
       <div class="panel">
         <div class="row"><h2 style="margin:0">Material requirements plan</h2><span class="spacer"></span>
+          <button class="btn" id="buy-all" ${plan.summary.buy_lines ? '' : 'disabled'}>Raise purchase requests for shortages</button>
           <button class="btn primary" id="make-all" ${plan.summary.make_lines ? '' : 'disabled'}>Create jobs for all "make" lines</button></div>
         <div class="kpis" style="margin:10px 0">
           <div class="kpi"><span class="muted small">To make</span><b>${plan.summary.make_lines}</b></div>
@@ -178,7 +182,7 @@ const views = {
           <div class="kpi"><span class="muted small">Shortfall value</span><b>${money(plan.summary.shortfall_value)}</b></div>
         </div>
         <table><tr><th>Level</th><th>Item</th><th>Action</th><th class="n">Required</th><th class="n">On hand</th>
-          <th class="n">On order (jobs)</th><th class="n">Net need</th><th>UoM</th><th>Needed by</th><th class="n">Shortfall value</th><th>Driven by</th></tr>
+          <th class="n">On order (jobs + POs)</th><th class="n">Net need</th><th>UoM</th><th>Needed by</th><th class="n">Shortfall value</th><th>Driven by</th></tr>
           ${plan.lines.map(l => `<tr><td>${l.level}</td><td>${esc(l.item_no)}<div class="small muted">${esc(l.description)}</div></td>
             <td>${tag(l.action)}</td><td class="n">${num(l.gross, 3)}</td><td class="n">${num(l.on_hand, 3)}</td>
             <td class="n">${num(l.scheduled_receipts, 3)}</td><td class="n"><b>${l.net ? num(l.net, 3) : ''}</b></td>
@@ -198,6 +202,11 @@ const views = {
     };
     $('#sync-demand').onclick = () => guarded(async () => { const r = await post('/bc/sync-demand'); toast(`Demand: ${r.created} new, ${r.updated} updated, ${r.closed} closed`); render(); });
     $('#make-all').onclick = () => guarded(async () => { const j = await post('/plan/create-jobs'); toast(`Created ${j.length} planned job(s)`); render(); });
+    $('#buy-all').onclick = () => guarded(async () => {
+      const prs = await post(`/purchase-requests/from-shortages?operator=${encodeURIComponent(operator())}`);
+      toast(`Raised ${prs.length} purchase request(s). Review and send them on Purchasing.`);
+      goTo('purchasing');
+    });
     view.querySelectorAll('[data-job]').forEach(b => b.onclick = () => guarded(async () => {
       const j = await post(`/demand/${b.dataset.job}/create-job`); toast(`Created ${j.number}`); render();
     }));
@@ -234,6 +243,181 @@ const views = {
     $('#job-filter').onchange = e => { views.jobs.filter = e.target.value; render(); };
     $('#new-job').onclick = newJobDialog;
     view.querySelectorAll('[data-open]').forEach(r => r.onclick = () => jobDialog(+r.dataset.open));
+  },
+
+  async purchasing() {
+    const filter = views.purchasing.filter ?? 'draft,sent';
+    const [avail, prs, bc] = await Promise.all([api('/materials/availability'),
+      api('/purchase-requests' + (filter ? '?status=' + filter : '')), api('/bc/status')]);
+    const short = avail.filter(a => a.status === 'short');
+    const drafts = prs.filter(p => p.status === 'draft').length;
+    const onOrder = prs.filter(p => p.status === 'sent');
+    view.innerHTML = `
+      <div class="kpis" style="margin-bottom:16px">
+        <div class="kpi"><span class="muted small">Materials short</span><b>${short.length}</b></div>
+        <div class="kpi"><span class="muted small">Shortfall value</span><b>${money(short.reduce((a, s) => a + s.shortage_value, 0))}</b></div>
+        <div class="kpi"><span class="muted small">Draft requests</span><b>${drafts}</b></div>
+        <div class="kpi"><span class="muted small">POs on order</span><b>${onOrder.length}</b></div>
+      </div>
+      <div class="panel">
+        <div class="row"><h2 style="margin:0">Purchase requests</h2>
+          <select id="pr-filter">${[['draft,sent', 'Open'], ['received', 'Received'], ['', 'All']].map(([v, l]) =>
+            `<option value="${v}" ${v === filter ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <span class="spacer"></span>
+          <button class="btn primary" id="pr-raise" ${short.length ? '' : 'disabled'}>Raise requests for ${short.length} shortage${short.length === 1 ? '' : 's'}</button></div>
+        <div class="small muted" style="margin:6px 0 10px">One request per vendor. <b>Send to BC</b> creates the purchase order in Business Central.
+          Open requests count as supply in the plan, so the same shortage isn't bought twice.</div>
+        <div class="pr-list">${prs.slice(0, 60).map(pr => `
+          <div class="pr">
+            <div class="row"><b>${esc(pr.number)}</b>${tag(pr.status)}${pr.bc_po_no ? `<span class="tag">BC ${esc(pr.bc_po_no)}</span>` : ''}
+              <span>${esc(pr.vendor_name)} <span class="muted small">${esc(pr.vendor_no)}</span></span><span class="spacer"></span>
+              <span class="muted small">${pr.needed_by ? 'needed by ' + esc(pr.needed_by) : ''}</span><b>${money(pr.value)}</b></div>
+            <div class="tbl"><table><tr><th>Item</th><th class="n">Qty</th><th>UoM</th><th class="n">Unit cost</th><th class="n">Value</th><th>Needed by</th></tr>
+              ${pr.lines.map(l => `<tr><td>${esc(l.item_no)} <span class="muted small">${esc(l.description)}</span></td>
+                <td class="n">${pr.status === 'draft' ? `<input type="number" step="any" min="0" value="${l.qty}" data-prline="${pr.id}:${l.id}" style="width:90px">` : num(l.qty, 3)}</td>
+                <td>${esc(l.uom)}</td><td class="n">${money(l.unit_cost)}</td><td class="n">${money(l.value)}</td><td>${esc(l.needed_by || '')}</td></tr>`).join('')}</table></div>
+            <div class="row">${pr.status === 'draft' ? `<button class="btn primary" data-prsend="${pr.id}">Send to BC</button><button class="btn" data-prcancel="${pr.id}">Cancel</button>` : ''}
+              ${pr.status === 'sent' && bc.mode === 'mock' ? `<button class="btn" data-prreceive="${pr.id}">Receive (demo)</button>` : ''}
+              ${pr.status === 'sent' && bc.mode !== 'mock' ? '<span class="small muted">Receive in BC, then pull items &amp; stock.</span>' : ''}
+              <span class="spacer"></span><span class="small muted">${pr.created_by ? 'by ' + esc(pr.created_by) + ' · ' : ''}${when(pr.created_at)}</span></div>
+          </div>`).join('') || '<div class="muted">No purchase requests here.</div>'}
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Material availability</h2>
+        <div class="small muted" style="margin-bottom:8px">Allocated = still needed by open jobs. Available = on hand − allocated.
+          Planned need = demand not yet on a job.</div>
+        <table><tr><th>Item</th><th>Vendor</th><th class="n">On hand</th><th class="n">Allocated</th><th class="n">Available</th>
+          <th class="n">On order</th><th class="n">Planned need</th><th class="n">Short</th><th>Needed by</th><th>Status</th></tr>
+          ${avail.map(a => `<tr><td>${esc(a.item_no)}<div class="small muted">${esc(a.description)}</div></td>
+            <td class="small">${esc(a.vendor_name)}<div class="muted">${a.lead_time_days} days</div></td>
+            <td class="n">${num(a.on_hand, 1)}</td><td class="n">${num(a.allocated, 1)}</td>
+            <td class="n ${a.available < 0 ? 'unfav' : ''}">${num(a.available, 1)}</td><td class="n">${a.on_order ? num(a.on_order, 1) : ''}</td>
+            <td class="n">${a.planned_need ? num(a.planned_need, 1) : ''}</td>
+            <td class="n"><b>${a.shortage ? num(a.shortage, 1) + ' ' + esc(a.uom) : ''}</b></td><td>${esc(a.needed_by || '')}</td>
+            <td>${statusChip(a.status)}</td></tr>`).join('')}
+        </table>
+      </div>`;
+    $('#pr-filter').onchange = e => { views.purchasing.filter = e.target.value; render(); };
+    $('#pr-raise').onclick = () => guarded(async () => {
+      const r = await post(`/purchase-requests/from-shortages?operator=${encodeURIComponent(operator())}`);
+      toast(`Raised ${r.length} purchase request(s)`); views.purchasing.filter = 'draft,sent'; render();
+    });
+    view.querySelectorAll('[data-prline]').forEach(i => i.onchange = () => guarded(async () => {
+      const [pr, line] = i.dataset.prline.split(':').map(Number);
+      await post(`/purchase-requests/${pr}/line`, { line_id: line, qty: +i.value }); render();
+    }));
+    view.querySelectorAll('[data-prsend]').forEach(b => b.onclick = () => guarded(async () => {
+      const pr = await post(`/purchase-requests/${b.dataset.prsend}/send`); toast(`Purchase order ${pr.bc_po_no} created in BC`); render();
+    }));
+    view.querySelectorAll('[data-prcancel]').forEach(b => b.onclick = async () => {
+      if (await askConfirm('Cancel this purchase request?', 'Cancel request')) guarded(async () => { await post(`/purchase-requests/${b.dataset.prcancel}/cancel`); render(); });
+    });
+    view.querySelectorAll('[data-prreceive]').forEach(b => b.onclick = () => guarded(async () => {
+      const pr = await post(`/purchase-requests/${b.dataset.prreceive}/receive`, {}); toast(`${pr.bc_po_no} received into stock`); render();
+    }));
+  },
+
+  async issues() {
+    const f = views.issues.f || { status: 'open', category: '', stage_id: '' };
+    const qs = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
+    const [issues, stages] = await Promise.all([api('/issues?' + qs), api('/stages')]);
+    view.innerHTML = `
+      <div class="panel">
+        <div class="row"><h2 style="margin:0">Issue log</h2><span class="spacer"></span>
+          <button class="btn primary" id="iss-new">Log an issue</button></div>
+        <div class="row" style="margin:10px 0">
+          <select id="f-status"><option value="open" ${f.status === 'open' ? 'selected' : ''}>Open</option>
+            <option value="resolved" ${f.status === 'resolved' ? 'selected' : ''}>Resolved</option><option value="" ${!f.status ? 'selected' : ''}>All</option></select>
+          <select id="f-cat"><option value="">All categories</option>${CATEGORIES.map(c => `<option ${c === f.category ? 'selected' : ''}>${c}</option>`).join('')}</select>
+          <select id="f-stage"><option value="">All stages</option>${stages.map(s => `<option value="${s.id}" ${String(s.id) === String(f.stage_id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+          <span class="muted small">${issues.length} shown · ${num(issues.reduce((a, i) => a + i.minutes_lost, 0) / 60, 1)} h downtime</span>
+        </div>
+        <table><tr><th>Issue</th><th>Raised</th><th>Stage / job</th><th>Category</th><th>Severity</th><th>What happened</th><th class="n">Lost</th><th>Status</th><th></th></tr>
+          ${issues.map(i => `<tr>
+            <td><b>${esc(i.number)}</b></td><td class="small muted">${when(i.created_at)}<div>${esc(i.operator)}</div></td>
+            <td>${esc(i.stage || '')}${i.job ? `<div class="small"><a href="#" data-open="${i.job_id}">${esc(i.job)}</a> ${esc(i.item_no || '')}</div>` : ''}</td>
+            <td>${esc(i.category)}</td><td>${severityChip(i.severity)}</td>
+            <td>${esc(i.title)}${i.detail ? `<div class="small muted">${esc(i.detail)}</div>` : ''}
+              ${i.resolution ? `<div class="small"><b>Fix:</b> ${esc(i.resolution)}</div>` : ''}</td>
+            <td class="n">${i.minutes_lost ? num(i.minutes_lost) + ' min' : ''}${i.qty_affected ? `<div class="small">${num(i.qty_affected)} units</div>` : ''}</td>
+            <td>${tag(i.status)}</td>
+            <td class="n">${i.status === 'open' ? `<button class="btn" data-resolve="${i.id}">Resolve</button>` : ''}</td></tr>`).join('')
+            || '<tr><td colspan="9" class="muted">No issues match.</td></tr>'}
+        </table>
+      </div>`;
+    const set = (k, v) => { views.issues.f = { ...f, [k]: v }; render(); };
+    $('#f-status').onchange = e => set('status', e.target.value);
+    $('#f-cat').onchange = e => set('category', e.target.value);
+    $('#f-stage').onchange = e => set('stage_id', e.target.value);
+    $('#iss-new').onclick = () => issueDialog({});
+    view.querySelectorAll('[data-resolve]').forEach(b => b.onclick = () => resolveDialog(+b.dataset.resolve));
+    view.querySelectorAll('[data-open]').forEach(a => a.onclick = e => { e.preventDefault(); jobDialog(+a.dataset.open); });
+  },
+
+  async reports() {
+    const r = await api('/reports/performance?weeks=10');
+    const o = r.overall;
+    const pct = x => (x == null ? '—' : `${Math.round(x * 100)}%`);
+    const full = r.weeks.filter(w => !w.partial);
+    const first = full[0], last = full[full.length - 1];
+    view.innerHTML = `
+      <div class="kpis" style="margin-bottom:16px">
+        <div class="kpi"><span class="muted small">OEE, last 10 weeks</span><b>${pct(o.oee)}</b></div>
+        <div class="kpi"><span class="muted small">Availability</span><b>${pct(o.availability)}</b></div>
+        <div class="kpi"><span class="muted small">Performance</span><b>${pct(o.performance)}</b></div>
+        <div class="kpi"><span class="muted small">Quality</span><b>${pct(o.quality)}</b></div>
+        <div class="kpi"><span class="muted small">Output vs capacity</span><b>${pct(o.output_vs_capacity)}</b></div>
+        <div class="kpi"><span class="muted small">Production variance</span><b>${variance(r.costs.total_variance)}</b></div>
+        <div class="kpi"><span class="muted small">Open issues</span><b>${r.issues.open}</b></div>
+      </div>
+      <div class="panel">
+        <div class="row"><h2 style="margin:0">Output vs capacity and OEE by week</h2><span class="spacer"></span>
+          ${r.trend ? `<span class="small muted">Trend ${r.trend.slope >= 0 ? '+' : '−'}${Math.abs(r.trend.slope * 100).toFixed(1)} points/week · ${pct(first?.output_vs_capacity)} → ${pct(last?.output_vs_capacity)}</span>` : ''}</div>
+        <div class="small muted" style="margin:4px 0 8px">Output vs capacity = standard hours of good output ÷ available hours. OEE = availability × performance × quality.</div>
+        <div class="chart-wrap" id="trend-chart">${trendChart(r.weeks, r.trend, Math.max(300, view.clientWidth - 34))}<div class="tip" id="trend-tip" hidden></div></div>
+        <details style="margin-top:8px"><summary class="small">Show as table</summary>
+          <table><tr><th>Week of</th><th class="n">Output vs capacity</th><th class="n">OEE</th><th class="n">Availability</th><th class="n">Performance</th><th class="n">Quality</th><th class="n">Earned h</th><th class="n">Capacity h</th><th class="n">Downtime h</th></tr>
+          ${r.weeks.map(w => `<tr><td>${esc(w.week)}${w.partial ? ' (so far)' : ''}</td><td class="n">${pct(w.output_vs_capacity)}</td><td class="n">${pct(w.oee)}</td>
+            <td class="n">${pct(w.availability)}</td><td class="n">${pct(w.performance)}</td><td class="n">${pct(w.quality)}</td>
+            <td class="n">${num(w.earned_hours, 1)}</td><td class="n">${num(w.capacity_hours, 1)}</td><td class="n">${num(w.downtime_hours, 1)}</td></tr>`).join('')}</table></details>
+      </div>
+      <div class="panel">
+        <h2>Opportunities for improvement</h2>
+        <div class="small muted" style="margin-bottom:8px">Ranked by cost over the period; annualised at the same rate.</div>
+        <div class="opps">${r.opportunities.slice(0, 8).map(op => `<div class="opp">
+          <div class="row"><span class="tag">${esc(op.area)}</span><b>${esc(op.title)}</b><span class="spacer"></span>
+            <span class="opp-val">${money(op.impact)}<span class="small muted"> · about ${Math.round(op.annualised).toLocaleString()} a year</span></span></div>
+          <div class="small muted">${esc(op.detail)}</div></div>`).join('') || '<div class="muted">Nothing stands out yet.</div>'}</div>
+      </div>
+      <div class="panel">
+        <h2>OEE by stage</h2>
+        <table><tr><th>Stage</th><th class="n">OEE</th><th>Availability · Performance · Quality</th><th class="n">Output vs capacity</th><th class="n">Worked h</th><th class="n">Downtime h</th><th class="n">Scrap</th></tr>
+          ${r.by_stage.map(s => `<tr><td><span class="dot" style="background:${esc(s.color)}"></span>${esc(s.stage)}</td>
+            <td class="n"><b>${pct(s.oee)}</b></td>
+            <td><div class="apq">${['availability', 'performance', 'quality'].map(k => `<span title="${k}">${meter(s[k] == null ? null : Math.min(1, s[k]))}<span class="small">${pct(s[k])}</span></span>`).join('')}</div></td>
+            <td class="n">${pct(s.output_vs_capacity)}</td><td class="n">${num(s.worked_hours, 1)}</td><td class="n">${num(s.downtime_hours, 1)}</td><td class="n">${num(s.scrap_units)}</td></tr>`).join('')}
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Average cost by product</h2>
+        <table><tr><th>Product</th><th class="n">Jobs</th><th class="n">Units</th><th class="n">Avg actual / unit</th><th class="n">BC standard</th><th class="n">vs standard</th>
+          <th class="n">Earlier avg</th><th class="n">Last 4 weeks</th><th class="n">Variance</th></tr>
+          ${r.costs.products.map(p => `<tr><td>${esc(p.item_no)}<div class="small muted">${esc(p.description)}</div></td><td class="n">${p.jobs}</td><td class="n">${num(p.units)}</td>
+            <td class="n"><b>${money(p.avg_unit_cost)}</b></td><td class="n">${money(p.bc_standard)}</td>
+            <td class="n">${p.variance_pct == null ? '' : `<span class="${p.variance_pct > 0.005 ? 'unfav' : p.variance_pct < -0.005 ? 'fav' : ''}">${p.variance_pct > 0 ? '+' : ''}${(p.variance_pct * 100).toFixed(1)}%</span>`}</td>
+            <td class="n">${p.earlier_avg != null ? money(p.earlier_avg) : '—'}</td><td class="n">${p.recent_avg != null ? money(p.recent_avg) : '—'}</td>
+            <td class="n">${variance(p.variance)}</td></tr>`).join('')}
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Downtime by cause</h2>
+        <table><tr><th>Cause</th><th>Stage</th><th class="n">Events</th><th class="n">Hours lost</th><th class="n">Cost</th><th></th></tr>
+          ${r.downtime.slice(0, 10).map((d, k, arr) => `<tr><td>${esc(d.category)}</td><td>${esc(d.stage)}</td><td class="n">${d.count}</td>
+            <td class="n">${num(d.hours, 1)}</td><td class="n">${money(d.cost)}</td><td style="width:30%">${bar(d.cost / arr[0].cost)}</td></tr>`).join('')}
+        </table>
+      </div>`;
+    bindTrendHover(r.weeks);
   },
 
   async recipes() {
@@ -308,9 +492,10 @@ const views = {
     view.innerHTML = `
       <div class="panel">
         <div class="row"><h2 style="margin:0">Stages</h2><span class="muted small">Rate = labour + overhead per hour, used to cost time at each stage</span></div>
-        <table style="margin-top:8px"><tr><th>Seq</th><th>Code</th><th>Name</th><th class="n">Rate / hour</th><th>Colour</th></tr>
+        <table style="margin-top:8px"><tr><th>Seq</th><th>Code</th><th>Name</th><th class="n">Rate / hour</th><th class="n">Hours / day</th><th>Colour</th></tr>
           ${stages.map(s => `<tr><td>${s.sequence}</td><td>${esc(s.code)}</td><td>${esc(s.name)}</td>
             <td class="n"><input type="number" step="any" value="${s.rate_per_hour}" data-rate="${s.id}" style="width:90px"></td>
+            <td class="n"><input type="number" step="any" value="${s.capacity_hours_per_day}" data-cap="${s.id}" style="width:80px" title="Available hours per working day: shifts x people or machines"></td>
             <td><input type="color" value="${esc(s.color)}" data-color="${s.id}"></td></tr>`).join('')}
         </table>
         <form id="add-stage" class="row" style="margin-top:8px">
@@ -322,10 +507,11 @@ const views = {
       <div class="panel">
         <div class="row"><h2 style="margin:0">Items</h2><span class="spacer"></span>
           <button class="btn" id="sync-items">Pull items, costs & stock from BC</button></div>
-        <table style="margin-top:8px"><tr><th>No.</th><th>Description</th><th>Type</th><th>UoM</th><th class="n">Std cost</th><th class="n">On hand</th><th>Lot tracked</th><th>Synced from BC</th></tr>
+        <table style="margin-top:8px"><tr><th>No.</th><th>Description</th><th>Type</th><th>UoM</th><th class="n">Std cost</th><th class="n">On hand</th><th>Vendor</th><th>Lot tracked</th><th>Synced from BC</th></tr>
           ${items.map(i => `<tr><td>${esc(i.no)}</td><td>${esc(i.description)}</td>
             <td><select data-type="${i.id}">${['raw', 'sub', 'finished'].map(t => `<option ${t === i.item_type ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
             <td>${esc(i.uom)}</td><td class="n">${money(i.unit_cost)}</td><td class="n">${num(i.qty_on_hand, 3)}</td>
+            <td class="small">${esc(i.vendor_name || '')}${i.vendor_no ? ` <span class="muted">${esc(i.vendor_no)} · ${i.lead_time_days} d</span>` : ''}</td>
             <td>${i.item_type === 'raw' ? `<input type="checkbox" data-lot="${i.id}" ${i.lot_tracked ? 'checked' : ''}>` : '<span class="small muted">output lot per job</span>'}</td>
             <td class="small muted">${when(i.bc_synced_at)}</td></tr>`).join('')}
         </table>
@@ -336,6 +522,7 @@ const views = {
           <input name="unit_cost" type="number" step="any" placeholder="Unit cost" style="width:100px">
           <button class="btn">Add item (local only)</button></form>
       </div>`;
+    view.querySelectorAll('[data-cap]').forEach(i => i.onchange = () => guarded(() => api(`/stages/${i.dataset.cap}`, { method: 'PATCH', body: { capacity_hours_per_day: +i.value } })));
     view.querySelectorAll('[data-rate]').forEach(i => i.onchange = () => guarded(() => api(`/stages/${i.dataset.rate}`, { method: 'PATCH', body: { rate_per_hour: +i.value } })));
     view.querySelectorAll('[data-color]').forEach(i => i.onchange = () => guarded(() => api(`/stages/${i.dataset.color}`, { method: 'PATCH', body: { color: i.value } })));
     view.querySelectorAll('[data-lot]').forEach(c => c.onchange = () => guarded(() => api(`/items/${c.dataset.lot}`, { method: 'PATCH', body: { lot_tracked: c.checked } })));
@@ -375,6 +562,179 @@ const views = {
     $('#b-post').onclick = () => guarded(async () => { const r = await post('/bc/process-postings'); toast(`Posted ${r.posted}, failed ${r.failed}`); render(); });
   },
 };
+
+// ---------------------------------------------------------------- small visual helpers
+const CATEGORIES = ['breakdown', 'changeover', 'material', 'quality', 'safety', 'waiting', 'other'];
+const statusChip = s => ({ short: '<span class="chip bad">● Short</span>', tight: '<span class="chip warn">▲ Tight</span>' }[s]
+  || '<span class="chip ok">✓ OK</span>');
+const severityChip = s => ({ high: '<span class="chip bad">● High</span>', medium: '<span class="chip warn">▲ Medium</span>' }[s]
+  || '<span class="chip">○ Low</span>');
+const meter = v => `<span class="meter"><span style="width:${v == null ? 0 : Math.round(v * 100)}%"></span></span>`;
+const bar = v => `<span class="hbar"><span style="width:${Math.max(2, Math.round(v * 100))}%"></span></span>`;
+
+// Weekly trend: output vs capacity (series 1) and OEE (series 2), with a fitted trend line for output.
+function trendChart(weeks, trend, width) {
+  const W = Math.round(width), H = W < 500 ? 220 : 280, L = 40, R = W < 500 ? 78 : 96, T = 14, B = 30;
+  const pw = W - L - R, ph = H - T - B;
+  const vals = weeks.flatMap(w => [w.output_vs_capacity, w.oee]).filter(v => v != null);
+  const top = Math.max(1, Math.ceil(Math.max(...vals, 0) * 10) / 10);
+  const x = i => L + (weeks.length === 1 ? pw / 2 : (i / (weeks.length - 1)) * pw);
+  const y = v => T + ph - (v / top) * ph;
+  const ticks = []; for (let v = 0; v <= top + 1e-9; v += top > 1 ? 0.25 : 0.2) ticks.push(v);
+  const path = key => {
+    let d = '', pen = false;
+    weeks.forEach((w, i) => { const v = w[key]; if (v == null) { pen = false; return; } d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`; pen = true; });
+    return d;
+  };
+  const lastIdx = key => { for (let i = weeks.length - 1; i >= 0; i--) if (weeks[i][key] != null) return i; return -1; };
+  const label = (key, cls, text) => {
+    const i = lastIdx(key); if (i < 0) return '';
+    return `<text class="lbl ${cls}" x="${x(i) + 10}" y="${y(weeks[i][key]) + 4}">${text} ${Math.round(weeks[i][key] * 100)}%</text>`;
+  };
+  // keep the two end labels apart
+  let l1 = label('output_vs_capacity', 's1', 'Output'), l2 = label('oee', 's2', 'OEE');
+  const i1 = lastIdx('output_vs_capacity'), i2 = lastIdx('oee');
+  if (i1 >= 0 && i2 >= 0 && Math.abs(y(weeks[i1].output_vs_capacity) - y(weeks[i2].oee)) < 14) {
+    const up = weeks[i1].output_vs_capacity > weeks[i2].oee;
+    l1 = l1.replace(/y="([\d.]+)"/, (_, v) => `y="${+v + (up ? -7 : 7)}"`);
+    l2 = l2.replace(/y="([\d.]+)"/, (_, v) => `y="${+v + (up ? 7 : -7)}"`);
+  }
+  const trendLine = trend ? `<line class="trend" x1="${x(0)}" y1="${y(trend.intercept)}" x2="${x(weeks.length - 1)}" y2="${y(trend.intercept + trend.slope * (weeks.length - 1))}"/>` : '';
+  const fmt = d => new Date(d + 'T00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  return `<div class="legend"><span><i class="sw s1"></i>Output vs capacity</span><span><i class="sw s1 dash"></i>Output trend</span>
+      <span><i class="sw s2"></i>OEE</span><span><i class="sw ref"></i>100% of capacity</span></div>
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" data-w="${W}" class="chart" role="img" aria-label="Weekly output versus capacity and OEE">
+    ${ticks.map(v => `<line class="grid" x1="${L}" x2="${L + pw}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${Math.round(v * 100)}%</text>`).join('')}
+    <line class="ref" x1="${L}" x2="${L + pw}" y1="${y(1)}" y2="${y(1)}"/>
+    ${weeks.map((w, i) => (i % (W < 500 ? 3 : 2) === 0 || i === weeks.length - 1) ? `<text class="axis" x="${x(i)}" y="${H - 8}" text-anchor="middle">${fmt(w.week)}</text>` : '').join('')}
+    ${trendLine}
+    <path class="ln s2" d="${path('oee')}"/><path class="ln s1" d="${path('output_vs_capacity')}"/>
+    ${weeks.map((w, i) => ['oee', 'output_vs_capacity'].map(k => w[k] == null ? '' :
+      `<circle class="pt ${k === 'oee' ? 's2' : 's1'}" cx="${x(i)}" cy="${y(w[k])}" r="4"/>`).join('')).join('')}
+    ${l1}${l2}
+    <line class="cross" id="cross" x1="0" x2="0" y1="${T}" y2="${T + ph}" visibility="hidden"/>
+    ${weeks.map((w, i) => `<rect class="hit" data-i="${i}" x="${x(i) - pw / (2 * Math.max(1, weeks.length - 1))}" y="${T}" width="${pw / Math.max(1, weeks.length - 1)}" height="${ph}"/>`).join('')}
+  </svg>`;
+}
+
+function bindTrendHover(weeks) {
+  const wrap = $('#trend-chart'), tip = $('#trend-tip'), cross = $('#cross');
+  if (!wrap) return;
+  const pct = v => (v == null ? '—' : Math.round(v * 100) + '%');
+  wrap.querySelectorAll('.hit').forEach(h => {
+    h.onpointerenter = () => {
+      const w = weeks[+h.dataset.i];
+      const box = h.getBBox(), cx = box.x + box.width / 2;
+      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); cross.setAttribute('visibility', 'visible');
+      tip.innerHTML = `<b>Week of ${new Date(w.week + 'T00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}${w.partial ? ' (so far)' : ''}</b>
+        <div><i class="sw s1"></i>Output vs capacity <b>${pct(w.output_vs_capacity)}</b></div>
+        <div><i class="sw s2"></i>OEE <b>${pct(w.oee)}</b></div>
+        <div class="muted">A ${pct(w.availability)} · P ${pct(w.performance)} · Q ${pct(w.quality)}</div>
+        <div class="muted">${num(w.earned_hours, 1)} of ${num(w.capacity_hours, 1)} h · ${num(w.downtime_hours, 1)} h down</div>`;
+      tip.hidden = false;
+      const svg = wrap.querySelector('svg').getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+      const px = svg.left - wr.left + (cx / +wrap.querySelector('svg').dataset.w) * svg.width;
+      tip.style.left = Math.min(Math.max(0, px - 90), wr.width - 190) + 'px';
+      tip.style.top = '36px';
+    };
+  });
+  wrap.onpointerleave = () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); };
+}
+
+// ---------------------------------------------------------------- notes & issues
+function notesAndIssues(job, opId) {
+  const notes = job.notes.filter(n => !opId || n.job_operation_id === opId || !n.job_operation_id);
+  const issues = job.issue_logs.filter(i => !opId || i.job_operation_id === opId);
+  return `<div class="row"><h2 style="margin:0">Notes &amp; issues${opId ? ' at this stage' : ''}</h2><span class="spacer"></span>
+      <button type="button" class="btn" id="add-note">Add note</button>
+      <button type="button" class="btn" id="add-issue">Log issue</button></div>
+    ${issues.length ? `<table>${issues.map(i => `<tr><td>${severityChip(i.severity)}</td><td><b>${esc(i.title)}</b>
+        <div class="small muted">${esc(i.number)} · ${esc(i.category)} · ${esc(i.stage || '')} · ${when(i.created_at)} · ${esc(i.operator)}</div>
+        ${i.detail ? `<div class="small">${esc(i.detail)}</div>` : ''}${i.resolution ? `<div class="small"><b>Fix:</b> ${esc(i.resolution)}</div>` : ''}</td>
+        <td class="n small">${i.minutes_lost ? num(i.minutes_lost) + ' min' : ''}${i.qty_affected ? `<div>${num(i.qty_affected)} units</div>` : ''}</td>
+        <td>${i.status === 'open' ? `<button type="button" class="btn" data-resolve="${i.id}">Resolve</button>` : tag(i.status)}</td></tr>`).join('')}</table>` : ''}
+    ${notes.length ? `<div class="notes">${notes.map(n => `<div class="note"><b>${esc(n.note)}</b>
+        ${n.detail ? `<div>${esc(n.detail)}</div>` : ''}
+        <div class="small muted">${esc(n.operator || 'Unknown')} · ${esc(n.stage || 'Job')} · ${when(n.created_at)}</div></div>`).join('')}</div>` : ''}
+    ${!issues.length && !notes.length ? '<div class="small muted">No notes or issues yet.</div>' : ''}`;
+}
+
+function bindNotesAndIssues(root, job, opId, reopen) {
+  $('#add-note', root).onclick = () => noteDialog(job.id, opId, reopen);
+  $('#add-issue', root).onclick = () => issueDialog({ job_id: job.id, operation_id: opId, stage_id: opId ? job.operations.find(o => o.id === opId)?.stage_id : null }, reopen);
+  root.querySelectorAll('[data-resolve]').forEach(b => b.onclick = () => resolveDialog(+b.dataset.resolve, reopen));
+}
+
+function noteDialog(jobId, opId, back) {
+  openDialog(`<h2>Add note</h2>
+    <label>Note<input id="n-note" maxlength="300" placeholder="e.g. First-off checked and signed" required></label>
+    <label>Detail (optional)<textarea id="n-detail" rows="4" placeholder="Anything the next shift or the office should know"></textarea></label>
+    <div class="row"><span class="spacer"></span><button type="button" class="btn" id="n-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="n-save">Save note</button></div>`, root => {
+    $('#n-cancel', root).onclick = () => (back ? back() : closeDialog());
+    $('#n-save', root).onclick = () => guarded(async () => {
+      if (!$('#n-note', root).value.trim()) throw new Error('Write a short note first');
+      await post(`/jobs/${jobId}/notes`, { note: $('#n-note', root).value.trim(), detail: $('#n-detail', root).value.trim(),
+        operation_id: opId || null, operator: operator() });
+      toast('Note saved');
+      back ? back() : closeDialog();
+      render(true);
+    });
+  });
+}
+
+async function issueDialog(ctx, back) {
+  const [stages, jobs] = await Promise.all([api('/stages'), api('/jobs?status=released,in_progress')]);
+  openDialog(`<h2>Log an issue</h2>
+    <label>What happened<input id="i-title" maxlength="200" placeholder="e.g. Curing oven over-temperature alarm"></label>
+    <div class="row">
+      <label>Category<select id="i-cat">${CATEGORIES.map(c => `<option>${c}</option>`).join('')}</select></label>
+      <label>Severity<select id="i-sev"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option></select></label>
+      <label>Stage<select id="i-stage"><option value="">—</option>${stages.map(s => `<option value="${s.id}" ${s.id === ctx.stage_id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+      <label>Job<select id="i-job" ${ctx.job_id ? 'disabled' : ''}><option value="">—</option>${jobs.map(j => `<option value="${j.id}" ${j.id === ctx.job_id ? 'selected' : ''}>${esc(j.number)} ${esc(j.item_no)}</option>`).join('')}</select></label>
+    </div>
+    <div class="row">
+      <label>Minutes lost<input id="i-min" type="number" min="0" step="1" value="0" style="width:100px"></label>
+      <label>Units affected<input id="i-qty" type="number" min="0" step="any" value="0" style="width:100px"></label>
+    </div>
+    <label>Detail<textarea id="i-detail" rows="4" placeholder="What you saw, what you did, who you told"></textarea></label>
+    <div class="small muted">Minutes lost count as downtime in OEE. Scrap units on the job card too if parts were lost.</div>
+    <div class="row"><span class="spacer"></span><button type="button" class="btn" id="i-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="i-save">Log issue</button></div>`, root => {
+    $('#i-cancel', root).onclick = () => (back ? back() : closeDialog());
+    $('#i-save', root).onclick = () => guarded(async () => {
+      if (!$('#i-title', root).value.trim()) throw new Error('Say what happened first');
+      const jobId = ctx.job_id || ($('#i-job', root).value ? +$('#i-job', root).value : null);
+      const body = { title: $('#i-title', root).value.trim(), category: $('#i-cat', root).value, severity: $('#i-sev', root).value,
+        detail: $('#i-detail', root).value.trim(), job_id: jobId, operation_id: ctx.operation_id || null,
+        stage_id: $('#i-stage', root).value ? +$('#i-stage', root).value : null,
+        minutes_lost: +$('#i-min', root).value || 0, qty_affected: +$('#i-qty', root).value || 0, operator: operator() };
+      if (jobId && !body.operation_id && body.stage_id) {
+        const job = await api(`/jobs/${jobId}`);
+        body.operation_id = job.operations.find(o => o.stage_id === body.stage_id)?.id || null;
+      }
+      const i = await post('/issues', body);
+      toast(`${i.number} logged`);
+      back ? back() : closeDialog();
+      render(true);
+    });
+  });
+}
+
+function resolveDialog(issueId, back) {
+  openDialog(`<h2>Resolve issue</h2>
+    <label>What fixed it<textarea id="r-res" rows="4" placeholder="e.g. Thermocouple replaced; oven re-calibrated"></textarea></label>
+    <div class="row"><span class="spacer"></span><button type="button" class="btn" id="r-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="r-ok">Mark resolved</button></div>`, root => {
+    $('#r-cancel', root).onclick = () => (back ? back() : closeDialog());
+    $('#r-ok', root).onclick = () => guarded(async () => {
+      await post(`/issues/${issueId}/resolve`, { resolution: $('#r-res', root).value.trim(), operator: operator() });
+      toast('Issue resolved');
+      back ? back() : closeDialog();
+      render(true);
+    });
+  });
+}
 
 // ---------------------------------------------------------------- dialogs
 async function moveDialog(jobId, opId) {
@@ -417,8 +777,10 @@ async function moveDialog(jobId, opId) {
       <label>Reason<input id="q-note"></label>
       <button type="button" class="btn" id="do-scrap">Scrap</button>
     </div>
+    <div class="section">${notesAndIssues(job, opId)}</div>
     <div class="row"><span class="spacer"></span><button class="btn">Close</button></div>`, root => {
     $('#full', root).onclick = e => { e.preventDefault(); jobDialog(jobId); };
+    bindNotesAndIssues(root, job, opId, () => moveDialog(jobId, opId));
     const act = (path, body) => guarded(async () => {
       try {
         await post(`/jobs/${jobId}/${path}`, { operation_id: opId, operator: operator(), ...body });
@@ -484,8 +846,10 @@ async function jobDialog(jobId) {
     <h2>History</h2>
     <table>${j.events.map(e => `<tr><td class="small muted">${when(e.created_at)}</td><td>${esc(e.action)}</td><td>${esc(e.stage || '')}</td>
       <td class="n">${num(e.qty)}</td><td class="small">${esc(e.note)}</td><td class="small muted">${esc(e.operator)}</td></tr>`).join('')}</table>
+    <div class="section">${notesAndIssues(job, null)}</div>
     <div class="row"><span class="spacer"></span><button class="btn">Close</button></div>`, root => {
     const act = path => guarded(async () => { await post(`/jobs/${jobId}/${path}?operator=${encodeURIComponent(operator())}`); jobDialog(jobId); render(); });
+    bindNotesAndIssues(root, j, null, () => jobDialog(jobId));
     $('#j-release', root) && ($('#j-release', root).onclick = () => act('release'));
     $('#j-cancel', root) && ($('#j-cancel', root).onclick = () => act('cancel'));
     $('#j-finish', root) && ($('#j-finish', root).onclick = () => finishJob(jobId));
@@ -622,12 +986,15 @@ async function render(live = false, msg = null) {
   }
 }
 
+function goTo(viewName) {
+  current = viewName;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x.dataset.view === viewName));
+  render();
+}
+
 $('#tabs').onclick = e => {
   const b = e.target.closest('button');
-  if (!b) return;
-  current = b.dataset.view;
-  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x === b));
-  render();
+  if (b) goTo(b.dataset.view);
 };
 
 render();

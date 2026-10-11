@@ -6,7 +6,7 @@ needs it. Netting per item:
 
     gross     = independent demand + dependent demand from parents
                 + remaining component needs of open jobs (not yet issued)
-    supply    = qty on hand + remaining output of open jobs
+    supply    = qty on hand + remaining output of open jobs + open purchase requests
     net       = max(0, gross - supply)
 
 Net need of an item with an active recipe becomes planned production ("make"),
@@ -20,9 +20,10 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Demand, Item, Job, Recipe
+from ..models import Demand, Item, Job, PurchaseRequest, Recipe
 
 OPEN_JOB_STATUSES = ("planned", "released", "in_progress")
+OPEN_PR_STATUSES = ("draft", "sent")
 
 
 class RecipeCycleError(ValueError):
@@ -113,6 +114,11 @@ def build_plan(db: Session) -> dict:
         gross[d.item_id] += d.qty
         note_due(d.item_id, d.due_date)
         sources[d.item_id].append(f"{d.source.upper()} {d.reference or '#' + str(d.id)}: {d.qty:g}")
+
+    for pr in db.scalars(select(PurchaseRequest).where(PurchaseRequest.status.in_(OPEN_PR_STATUSES))):
+        for ln in pr.lines:
+            receipts[ln.item_id] += ln.qty
+            sources[ln.item_id].append(f"On order {pr.bc_po_no or pr.number}: {ln.qty:g}")
 
     for job in db.scalars(select(Job).where(Job.status.in_(OPEN_JOB_STATUSES))):
         receipts[job.item_id] += job_remaining_output(job)

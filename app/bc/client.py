@@ -4,6 +4,7 @@ Reads:
   * items        -> standard API v2.0  /companies({id})/items
   * demand       -> standard API v2.0  /companies({id})/salesOrders?$expand=salesOrderLines
 Writes:
+  * purchase orders -> standard API v2.0 purchaseOrders + purchaseOrderLines
   * item journal lines -> OData web service for page 40 "Item Journal",
     published in BC (Web Services page) under the name in BC_ITEM_JOURNAL_SERVICE.
     Lines land in the configured journal batch; posting the batch is done in
@@ -20,7 +21,7 @@ import time
 
 import httpx
 
-from .base import BcDemandLine, BcItem, BcJournalLine
+from .base import BcDemandLine, BcItem, BcJournalLine, BcPurchaseLine
 
 
 class LiveBusinessCentral:
@@ -89,7 +90,8 @@ class LiveBusinessCentral:
                 lines.append(BcDemandLine(
                     item_no=ln["lineObjectNumber"], qty=outstanding,
                     due_date=ln.get("shipmentDate") or so.get("requestedDeliveryDate"),
-                    reference=f"{so['number']}/{ln.get('sequence')}"))
+                    reference=f"{so['number']}/{ln.get('sequence')}",
+                    customer=so.get("customerName", "")))
         return lines
 
     def post_journal_line(self, line: BcJournalLine) -> dict:
@@ -108,3 +110,23 @@ class LiveBusinessCentral:
                             headers={**self._headers(), "Content-Type": "application/json"}, json=payload)
         r.raise_for_status()
         return r.json()
+
+    def create_purchase_order(self, vendor_no: str, lines: list[BcPurchaseLine], reference: str) -> str:
+        """Create a purchase order with one line per item. Returns the BC PO number."""
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        dates = [ln.needed_by for ln in lines if ln.needed_by]
+        header = {"vendorNumber": vendor_no}
+        if dates:
+            header["requestedReceiptDate"] = min(dates).isoformat()
+        r = self._http.post(f"{self.api_base}/purchaseOrders", headers=headers, json=header)
+        r.raise_for_status()
+        po = r.json()
+        for ln in lines:
+            body = {"lineType": "Item", "lineObjectNumber": ln.item_no, "quantity": ln.qty,
+                    "directUnitCost": ln.unit_cost}
+            if ln.needed_by:
+                body["expectedReceiptDate"] = ln.needed_by.isoformat()
+            lr = self._http.post(f"{self.api_base}/purchaseOrders({po['id']})/purchaseOrderLines",
+                                 headers=headers, json=body)
+            lr.raise_for_status()
+        return po["number"]
