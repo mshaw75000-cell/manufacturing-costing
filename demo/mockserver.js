@@ -1,17 +1,25 @@
 /*
  * In-browser stand-in for the Python API, used only by the phone demo
  * (demo/build.py). It ports the server logic in app/ (planning, production,
- * costing, lots/trace, mock BC) so the unchanged web UI can run without a
- * server. The Python code in app/ is the real implementation; keep this in
- * step when behaviour there changes. Data persists in localStorage.
+ * costing, lots/trace, purchasing, issues/notes, reports, mock BC) so the
+ * unchanged web UI can run without a server. The Python code in app/ is the
+ * real implementation; keep this in step when behaviour there changes.
+ *
+ * Starting data is the trial dataset exported by demo/export_state.py
+ * (window.MFG_SEED). Dates are shifted so the data is always current.
+ * Changes persist in localStorage.
  */
 'use strict';
 (function () {
   const EPS = 1e-9;
-  const KEY = 'mfgcost-demo-v1';
+  const KEY = 'mfgcost-demo-v2';
+  const DAY = 86400000;
   const r4 = x => Math.round(x * 1e4) / 1e4;
+  const r2 = x => Math.round(x * 100) / 100;
+  const nowD = () => new Date();
   const now = () => new Date().toISOString();
-  const today = (days = 0) => { const d = new Date(); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); };
+  const isoDate = d => d.toISOString().slice(0, 10);
+  const today = (days = 0) => isoDate(new Date(Date.now() + days * DAY));
 
   class ApiError extends Error {
     constructor(status, detail) { super(typeof detail === 'string' ? detail : detail.message); this.status = status; this.detail = detail; }
@@ -21,48 +29,28 @@
   // ------------------------------------------------------------------ state
   let S;
   const nextId = t => (S.seq[t] = (S.seq[t] || 0) + 1);
-  const add = (t, row) => { row.id = nextId(t); S[t].push(row); return row; };
+  const add = (t, row) => { row.id = nextId(t); if (!('created_at' in row) && t !== 'items' && t !== 'stages') row.created_at = now(); S[t].push(row); return row; };
   const byId = (t, id) => S[t].find(r => r.id === id);
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch { /* storage unavailable */ } };
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch { /* storage full or unavailable */ } };
 
-  const MOCK_BC = {
-    items: [
-      { no: 'RM-STL-3MM', description: 'Steel sheet 3mm 2400x1200', uom: 'SHEET', unit_cost: 185.00, inventory: 40 },
-      { no: 'RM-TUBE-50', description: 'RHS tube 50x50x3 6.5m', uom: 'LEN', unit_cost: 72.50, inventory: 60 },
-      { no: 'RM-WIRE-MIG', description: 'MIG wire 0.9mm', uom: 'KG', unit_cost: 9.80, inventory: 30 },
-      { no: 'RM-PWD-BLK', description: 'Powder coat satin black', uom: 'KG', unit_cost: 21.00, inventory: 25 },
-      { no: 'RM-BOLT-M10', description: 'Bolt M10x30 zinc', uom: 'EA', unit_cost: 0.45, inventory: 2000 },
-      { no: 'SA-BRKT-01', description: 'Pressed bracket (sub-assembly)', uom: 'EA', unit_cost: 15.50, inventory: 0 },
-      { no: 'FG-FRAME-01', description: 'Welded frame, powder coated black', uom: 'EA', unit_cost: 245.00, inventory: 0 },
-    ],
-    demand: [{ item_no: 'FG-FRAME-01', qty: 24, due_in_days: 10, reference: 'SO-1001/10000' }],
-    journal: [],
-  };
+  // Shift every date in the seed forward so "now" in the data is today.
+  function shiftDates(obj, ms, days) {
+    if (Array.isArray(obj)) { obj.forEach(o => shiftDates(o, ms, days)); return; }
+    if (!obj || typeof obj !== 'object') return;
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'string' && /(_at|_date|needed_by)$/.test(k)) {
+        if (/^\d{4}-\d\d-\d\dT/.test(v)) obj[k] = new Date(Date.parse(v) + ms).toISOString();
+        else if (/^\d{4}-\d\d-\d\d$/.test(v)) obj[k] = isoDate(new Date(Date.parse(v + 'T00:00:00Z') + days * DAY));
+      } else if (v && typeof v === 'object') shiftDates(v, ms, days);
+    }
+  }
 
   function seed() {
-    S = { seq: {}, items: [], stages: [], recipes: [], demands: [], jobs: [], lots: [], issues: [], events: [], postings: [],
-          bc: JSON.parse(JSON.stringify(MOCK_BC)) };
-    [['CUT', 'Cutting', 10, 85, '#0ea5e9'], ['PRESS', 'Pressing', 20, 110, '#8b5cf6'], ['WELD', 'Welding', 30, 95, '#f97316'],
-     ['PCOAT', 'Powder coating', 40, 120, '#10b981'], ['ASSY', 'Assembly', 50, 75, '#eab308']]
-      .forEach(([code, name, sequence, rate_per_hour, color]) => add('stages', { code, name, sequence, rate_per_hour, color }));
-    syncItems();
-    const st = Object.fromEntries(S.stages.map(s => [s.code, s.id]));
-    const it = Object.fromEntries(S.items.map(i => [i.no, i.id]));
-    for (const no of ['RM-STL-3MM', 'RM-PWD-BLK']) byId('items', it[no]).lot_tracked = true;
-    [['RM-STL-3MM', 'L24-0911', 'H-778120', 20, 'BlueScope', 'MC-55120'],
-     ['RM-STL-3MM', 'L24-0930', 'H-779455', 20, 'BlueScope', 'MC-55871'],
-     ['RM-PWD-BLK', 'PB-6611', '', 15, 'Dulux', 'COA-6611'],
-     ['RM-PWD-BLK', 'PB-6702', '', 10, 'Dulux', 'COA-6702']].forEach(([no, lot_no, heat_no, qty, supplier, cert_ref]) =>
-      newLot({ item_id: it[no], lot_no, heat_no, supplier, cert_ref, qty_received: qty, qty_on_hand: qty }));
-    const op = (stage, sequence, setup_minutes, run_minutes_per_unit) => ({ id: nextId('recipe_operations'), stage_id: st[stage], sequence, setup_minutes, run_minutes_per_unit });
-    const comp = (no, qty_per, scrap_pct, operation_seq) => ({ id: nextId('recipe_components'), item_id: it[no], qty_per, scrap_pct, operation_seq });
-    add('recipes', { item_id: it['SA-BRKT-01'], version: '1', output_qty: 20, std_batch_qty: null, active: true, notes: '20 brackets nested per sheet',
-      operations: [op('CUT', 10, 15, 0.5), op('PRESS', 20, 30, 0.75)], components: [comp('RM-STL-3MM', 1, 5, 10)] });
-    add('recipes', { item_id: it['FG-FRAME-01'], version: '1', output_qty: 1, std_batch_qty: 24, active: true, notes: '',
-      operations: [op('CUT', 10, 10, 4), op('WELD', 20, 15, 18), op('PCOAT', 30, 20, 6), op('ASSY', 40, 0, 5)],
-      components: [comp('RM-TUBE-50', 1.5, 3, 10), comp('SA-BRKT-01', 4, 0, 20), comp('RM-WIRE-MIG', 0.2, 0, 20),
-                   comp('RM-PWD-BLK', 0.6, 10, 30), comp('RM-BOLT-M10', 8, 0, 40)] });
-    syncDemand();
+    S = JSON.parse(JSON.stringify(window.MFG_SEED));
+    const built = Date.parse(S.built_at);
+    const ms = Date.now() - built;
+    const days = Math.round((Date.parse(today() + 'T00:00:00Z') - Date.parse(S.built_at.slice(0, 10) + 'T00:00:00Z')) / DAY);
+    shiftDates(S, ms, days);
     save();
   }
 
@@ -75,11 +63,18 @@
   const item = id => byId('items', id);
   const stage = id => byId('stages', id);
   const activeRecipe = itemId => S.recipes.filter(r => r.item_id === itemId && r.active).sort((a, b) => b.id - a.id)[0];
-  const activeRecipes = () => Object.fromEntries(S.items.map(i => [i.id, activeRecipe(i.id)]).filter(([, r]) => r));
+  const activeRecipes = () => { const m = {}; for (const r of S.recipes) if (r.active && (!m[r.item_id] || r.id > m[r.item_id].id)) m[r.item_id] = r; return m; };
   const componentQty = (recipe, c, outQty) => outQty / recipe.output_qty * c.qty_per * (1 + c.scrap_pct / 100);
-  const jobIssues = job => S.issues.filter(i => i.job_id === job.id);
+  let issuesByJob = null; // cache, rebuilt per request
+  const jobIssues = job => {
+    if (!issuesByJob) { issuesByJob = new Map(); for (const i of S.issues) { if (!issuesByJob.has(i.job_id)) issuesByJob.set(i.job_id, []); issuesByJob.get(i.job_id).push(i); } }
+    return issuesByJob.get(job.id) || [];
+  };
   const jobRecipe = job => byId('recipes', job.recipe_id);
-  const newLot = l => add('lots', { heat_no: '', supplier: '', cert_ref: '', source: 'receipt', job_id: null, notes: '', created_at: now(), ...l });
+  const newLot = l => add('lots', { heat_no: '', supplier: '', cert_ref: '', source: 'receipt', job_id: null, notes: '', ...l });
+  const OPEN_JOB = ['planned', 'released', 'in_progress'];
+  const OPEN_PR = ['draft', 'sent'];
+  const byTimeDesc = (a, b) => (b.created_at || '').localeCompare(a.created_at || '') || b.id - a.id;
 
   // ------------------------------------------------------------------ planning
   function jobRemainingComponents(job) {
@@ -116,7 +111,13 @@
       addG(d.item_id, d.qty); noteDue(d.item_id, d.due_date);
       src(d.item_id, `${d.source.toUpperCase()} ${d.reference || '#' + d.id}: ${+d.qty.toFixed(4)}`);
     }
-    for (const job of S.jobs.filter(j => ['planned', 'released', 'in_progress'].includes(j.status))) {
+    for (const pr of S.purchase_requests.filter(p => OPEN_PR.includes(p.status))) {
+      for (const ln of pr.lines) {
+        receipts[ln.item_id] = (receipts[ln.item_id] || 0) + ln.qty;
+        src(ln.item_id, `On order ${pr.bc_po_no || pr.number}: ${+ln.qty.toFixed(4)}`);
+      }
+    }
+    for (const job of S.jobs.filter(j => OPEN_JOB.includes(j.status))) {
       receipts[job.item_id] = (receipts[job.item_id] || 0) + jobRemainingOutput(job);
       for (const [id, q] of Object.entries(jobRemainingComponents(job))) {
         addG(+id, q); noteDue(+id, job.due_date); src(+id, `Job ${job.number}: ${+q.toFixed(4)}`);
@@ -155,7 +156,7 @@
     lines.sort((a, b) => a.level - b.level || a.item_no.localeCompare(b.item_no));
     const buy = lines.filter(l => l.action === 'buy');
     return { lines, summary: { make_lines: lines.filter(l => l.action === 'make').length, buy_lines: buy.length,
-      shortfall_value: Math.round(buy.reduce((a, l) => a + l.shortfall_value, 0) * 100) / 100 } };
+      shortfall_value: r2(buy.reduce((a, l) => a + l.shortfall_value, 0)) } };
   }
 
   // ------------------------------------------------------------------ costing
@@ -213,7 +214,7 @@
   // ------------------------------------------------------------------ production
   function log(job, op, action, qty, extra = {}) {
     add('events', { job_id: job.id, job_operation_id: op ? op.id : null, stage_id: op ? op.stage_id : null, action, qty,
-      minutes: extra.minutes || 0, operator: extra.operator || '', note: extra.note || '', created_at: now() });
+      minutes: extra.minutes || 0, operator: extra.operator || '', note: extra.note || '' });
   }
 
   function createJob(itemId, qty, dueDate = null, demandId = null) {
@@ -224,10 +225,11 @@
     const n = (S.seq.jobs || 0) + 1;
     const job = add('jobs', { number: 'MO' + String(n).padStart(6, '0'), item_id: itemId, recipe_id: r.id, demand_id: demandId, qty,
       status: 'planned', due_date: dueDate, qty_good: 0, qty_scrap: 0, material_cost: 0, conversion_cost: 0, unit_cost: 0,
-      std_unit_cost: r4(standardUnitCost(r, activeRecipes())), cost_snapshot: null, created_at: now(), completed_at: null,
-      operations: [...r.operations].sort((a, b) => a.sequence - b.sequence).map(o => ({ id: nextId('job_operations'), stage_id: o.stage_id,
+      std_unit_cost: r4(standardUnitCost(r, activeRecipes())), cost_snapshot: null, completed_at: null,
+      operations: [...r.operations].sort((a, b) => a.sequence - b.sequence).map(o => ({ id: nextId('job_operations'), job_id: null, stage_id: o.stage_id,
         sequence: o.sequence, setup_minutes: o.setup_minutes, run_minutes_per_unit: o.run_minutes_per_unit, qty_queued: 0,
         qty_in_process: 0, qty_done: 0, qty_scrap: 0, actual_minutes: 0, started_at: null, completed_at: null })) });
+    job.operations.forEach(o => { o.job_id = job.id; });
     log(job, null, 'create', qty);
     return job;
   }
@@ -256,10 +258,11 @@
       fail(409, { message: 'Insufficient stock: ' + shortages.map(s => `${s.item_no} (need ${+s.need.toFixed(4)}, have ${+s.on_hand.toFixed(4)})`).join(', '), shortages });
     }
     op.qty_queued -= qty; op.qty_in_process += qty;
-    if (!op.started_at) { op.started_at = now(); op.actual_minutes += op.setup_minutes; }
+    let setup = 0;
+    if (!op.started_at) { op.started_at = now(); setup = op.setup_minutes; op.actual_minutes += setup; }
     job.status = 'in_progress';
     for (const [c, q] of needs) issueMaterial(job, item(c.item_id), q, op, operator, (lotChoices || {})[c.item_id]);
-    log(job, op, 'start', qty, { operator });
+    log(job, op, 'start', qty, { operator, minutes: setup });
   }
 
   function allocateLots(it, qty, preferred) {
@@ -280,9 +283,10 @@
     it.qty_on_hand -= qty;
     for (const [lot, q] of parts) {
       if (lot) lot.qty_on_hand -= q;
-      add('issues', { job_id: job.id, job_operation_id: op ? op.id : null, item_id: it.id, lot_id: lot ? lot.id : null, qty: q, unit_cost: it.unit_cost, created_at: now() });
+      add('issues', { job_id: job.id, job_operation_id: op ? op.id : null, item_id: it.id, lot_id: lot ? lot.id : null, qty: q, unit_cost: it.unit_cost });
+      issuesByJob = null;
       add('postings', { kind: 'consumption', job_id: job.id, document_no: job.number, item_no: it.no, lot_no: lot ? lot.lot_no : '',
-        qty: q, unit_cost: it.unit_cost, status: 'pending', attempts: 0, error: '', created_at: now(), posted_at: null });
+        qty: q, unit_cost: it.unit_cost, status: 'pending', attempts: 0, error: '', posted_at: null });
       const where = lot ? `lot ${lot.lot_no}${lot.heat_no ? ', heat ' + lot.heat_no : ''}` : (it.lot_tracked ? 'NO LOT' : '');
       log(job, op, 'issue', q, { operator, note: `${it.no} x ${+q.toFixed(4)} ${it.uom}${where ? ` (${where})` : ''}` });
     }
@@ -308,7 +312,7 @@
     lot.qty_received += qty; lot.qty_on_hand += qty;
     const cost = outputUnitCost(job);
     add('postings', { kind: 'output', job_id: job.id, document_no: job.number, item_no: it.no, lot_no: job.number, qty,
-      unit_cost: cost, status: 'pending', attempts: 0, error: '', created_at: now(), posted_at: null });
+      unit_cost: cost, status: 'pending', attempts: 0, error: '', posted_at: null });
     log(job, null, 'output', qty, { note: `${it.no} x ${qty} to stock @ std ${cost.toFixed(4)}` });
   }
 
@@ -375,6 +379,185 @@
     return node;
   }
 
+  // ------------------------------------------------------------------ purchasing
+  const WHOLE = new Set(['EA', 'SHEET', 'LEN', 'PCS', 'CTN', 'BOX']);
+  const orderQty = (q, uom) => (WHOLE.has(uom.toUpperCase()) ? Math.ceil(q - EPS) : Math.ceil(q * 10 - EPS) / 10);
+
+  function availability() {
+    const plan = Object.fromEntries(buildPlan().lines.map(l => [l.item_id, l]));
+    const allocated = {}, onOrder = {};
+    for (const j of S.jobs.filter(j => OPEN_JOB.includes(j.status))) for (const [id, q] of Object.entries(jobRemainingComponents(j))) allocated[id] = (allocated[id] || 0) + q;
+    for (const pr of S.purchase_requests.filter(p => OPEN_PR.includes(p.status))) for (const l of pr.lines) onOrder[l.item_id] = (onOrder[l.item_id] || 0) + l.qty;
+    return S.items.filter(i => i.item_type === 'raw').sort((a, b) => a.no.localeCompare(b.no)).map(it => {
+      const line = plan[it.id], gross = line ? line.gross : 0, alloc = allocated[it.id] || 0, oo = onOrder[it.id] || 0;
+      const shortage = line && line.action === 'buy' ? line.net : 0, available = it.qty_on_hand - alloc;
+      return { item_id: it.id, item_no: it.no, description: it.description, uom: it.uom, unit_cost: it.unit_cost, vendor_no: it.vendor_no,
+        vendor_name: it.vendor_name, lead_time_days: it.lead_time_days, on_hand: it.qty_on_hand, allocated: r4(alloc), available: r4(available),
+        on_order: oo, planned_need: r4(Math.max(0, gross - alloc)), shortage: r4(shortage), shortage_value: r2(shortage * it.unit_cost),
+        needed_by: line ? line.earliest_due : null,
+        status: shortage > EPS ? 'short' : (gross > 0 && available + oo < gross * 0.15 + EPS ? 'tight' : 'ok') };
+    });
+  }
+
+  function prFromShortages(operator) {
+    const byVendor = new Map();
+    for (const l of buildPlan().lines.filter(l => l.action === 'buy' && l.net > EPS)) {
+      const it = item(l.item_id);
+      if (!byVendor.has(it.vendor_no)) byVendor.set(it.vendor_no, []);
+      byVendor.get(it.vendor_no).push([it, l]);
+    }
+    return [...byVendor.entries()].sort().map(([vendor, rows]) => {
+      const pr = add('purchase_requests', { number: 'PR' + String((S.seq.purchase_requests || 0) + 1).padStart(5, '0'), vendor_no: vendor,
+        vendor_name: rows[0][0].vendor_name || 'Vendor not set', status: 'draft', bc_po_no: '', notes: '', created_by: operator || '',
+        sent_at: null, received_at: null, lines: [] });
+      for (const [it, l] of rows) {
+        const needed = l.earliest_due ? isoDate(new Date(Date.parse(l.earliest_due + 'T00:00:00Z') - DAY)) : today(it.lead_time_days);
+        pr.lines.push({ id: nextId('purchase_request_lines'), request_id: pr.id, item_id: it.id, qty: orderQty(l.net, it.uom), unit_cost: it.unit_cost, needed_by: needed });
+      }
+      pr.needed_by = pr.lines.map(l => l.needed_by).sort()[0] || null;
+      return pr;
+    });
+  }
+
+  function prSend(pr) {
+    if (pr.status !== 'draft') fail(409, `Request is ${pr.status}; only drafts can be sent`);
+    if (!pr.lines.length) fail(409, 'Request has no lines');
+    if (!pr.vendor_no) fail(409, 'Set a vendor for these items before sending');
+    const po = `PO-${10001 + S.bc.purchase_orders.length}`;
+    S.bc.purchase_orders.push({ no: po, vendor_no: pr.vendor_no, reference: pr.number, status: 'Released',
+      lines: pr.lines.map(l => ({ item_no: item(l.item_id).no, qty: l.qty, unit_cost: l.unit_cost, needed_by: l.needed_by })) });
+    Object.assign(pr, { bc_po_no: po, status: 'sent', sent_at: now() });
+  }
+
+  function prReceive(pr, heats) {
+    if (pr.status !== 'sent') fail(409, 'Only requests sent to BC can be received');
+    const po = S.bc.purchase_orders.find(p => p.no === pr.bc_po_no);
+    if (po) {
+      po.status = 'Received';
+      for (const l of po.lines) { const bi = S.bc.items.find(i => i.no === l.item_no); if (bi) bi.inventory += l.qty; }
+    }
+    pr.lines.forEach((l, k) => {
+      const it = item(l.item_id);
+      it.qty_on_hand += l.qty;
+      if (it.lot_tracked) newLot({ item_id: it.id, lot_no: `${pr.bc_po_no}-${k + 1}`, heat_no: (heats || {})[l.id] || '', supplier: pr.vendor_name, qty_received: l.qty, qty_on_hand: l.qty });
+    });
+    Object.assign(pr, { status: 'received', received_at: now() });
+  }
+
+  // ------------------------------------------------------------------ reports
+  const weekStart = iso => { const d = new Date(iso); const ms = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()); return isoDate(new Date(ms - ((new Date(ms).getUTCDay() + 6) % 7) * DAY)); };
+  const ratio = (a, b) => (b > EPS ? a / b : null);
+  function metrics(m, capMin) {
+    const a = ratio(m.worked, m.worked + m.downtime), p = ratio(m.earned, m.worked), q = ratio(m.earned_good, m.earned);
+    const oee = a != null && p != null && q != null ? a * Math.min(p, 1) * q : null;
+    const r = x => (x == null ? null : r4(x));
+    return { availability: r(a), performance: r(p), quality: r(q), oee: r(oee), output_vs_capacity: r(ratio(m.earned_good, capMin)),
+      worked_hours: r2(m.worked / 60), downtime_hours: r2(m.downtime / 60), earned_hours: r2(m.earned_good / 60), capacity_hours: r2(capMin / 60),
+      good_units: m.good, scrap_units: m.scrap };
+  }
+  function trendFit(pts) {
+    pts = pts.filter(([, y]) => y != null);
+    if (pts.length < 2) return null;
+    const n = pts.length, mx = pts.reduce((a, [x]) => a + x, 0) / n, my = pts.reduce((a, [, y]) => a + y, 0) / n;
+    const sxx = pts.reduce((a, [x]) => a + (x - mx) ** 2, 0);
+    const slope = sxx ? pts.reduce((a, [x, y]) => a + (x - mx) * (y - my), 0) / sxx : 0;
+    return { slope: Math.round(slope * 1e5) / 1e5, intercept: Math.round((my - slope * mx) * 1e5) / 1e5 };
+  }
+
+  function performanceReport(weeks = 10) {
+    const todayIso = today(), thisWeek = weekStart(todayIso + 'T12:00:00Z');
+    const keys = []; for (let i = weeks - 1; i >= 0; i--) keys.push(isoDate(new Date(Date.parse(thisWeek + 'T00:00:00Z') - i * 7 * DAY)));
+    const since = keys[0] + 'T00:00:00';
+    const stages = [...S.stages].sort((a, b) => a.sequence - b.sequence);
+    const ops = new Map(); for (const j of S.jobs) for (const o of j.operations) ops.set(o.id, o);
+    const blank = () => ({ worked: 0, downtime: 0, earned: 0, earned_good: 0, good: 0, scrap: 0 });
+    const cell = new Map(); const get = (sid, wk) => { const k = sid + '|' + wk; if (!cell.has(k)) cell.set(k, blank()); return cell.get(k); };
+    for (const e of S.events) {
+      if (e.created_at < since || !['start', 'complete', 'scrap'].includes(e.action)) continue;
+      const op = ops.get(e.job_operation_id); if (!op) continue;
+      const m = get(op.stage_id, weekStart(e.created_at));
+      if (e.action === 'start') { m.worked += e.minutes; if (e.minutes) { m.earned += op.setup_minutes; m.earned_good += op.setup_minutes; } }
+      else if (e.action === 'complete') { m.worked += e.minutes; m.earned += op.run_minutes_per_unit * e.qty; m.earned_good += op.run_minutes_per_unit * e.qty; m.good += e.qty; }
+      else { m.earned += op.run_minutes_per_unit * e.qty; m.scrap += e.qty; }
+    }
+    const issues = S.issue_logs.filter(i => i.created_at >= since);
+    for (const i of issues) if (i.stage_id && i.minutes_lost) get(i.stage_id, weekStart(i.created_at)).downtime += i.minutes_lost;
+    const capWeek = Object.fromEntries(stages.map(s => [s.id, s.capacity_hours_per_day * 60 * 5]));
+    const capAll = Object.values(capWeek).reduce((a, b) => a + b, 0);
+    const daysIn = keys.map(wk => (wk === thisWeek ? Math.min(5, Math.round((Date.parse(todayIso) - Date.parse(wk)) / DAY) + 1) : 5));
+    const periodWeeks = daysIn.reduce((a, b) => a + b, 0) / 5;
+    const weekly = keys.map((wk, idx) => {
+      const tot = blank(); for (const s of stages) for (const [k, v] of Object.entries(get(s.id, wk))) tot[k] += v;
+      return { week: wk, index: idx, partial: daysIn[idx] < 5, ...metrics(tot, capAll * daysIn[idx] / 5) };
+    });
+    const full = weekly.filter(w => !w.partial);
+    const byStage = stages.map(s => {
+      const tot = blank(); for (const wk of keys) for (const [k, v] of Object.entries(get(s.id, wk))) tot[k] += v;
+      return { stage_id: s.id, stage: s.name, code: s.code, color: s.color, rate_per_hour: s.rate_per_hour, ...metrics(tot, capWeek[s.id] * periodWeeks) };
+    });
+    const overallTot = blank(); for (const s of stages) for (const wk of keys) for (const [k, v] of Object.entries(get(s.id, wk))) overallTot[k] += v;
+    const pareto = new Map();
+    for (const i of issues) {
+      if (!i.minutes_lost || !i.stage_id) continue;
+      const st = stage(i.stage_id), k = i.category + '|' + st.name;
+      const p = pareto.get(k) || { category: i.category, stage: st.name, minutes: 0, cost: 0, count: 0 };
+      p.minutes += i.minutes_lost; p.cost += i.minutes_lost / 60 * st.rate_per_hour; p.count++; pareto.set(k, p);
+    }
+    const downtime = [...pareto.values()].map(p => ({ category: p.category, stage: p.stage, hours: r2(p.minutes / 60), cost: r2(p.cost), count: p.count })).sort((a, b) => b.cost - a.cost);
+    const costs = costReport(since, isoDate(new Date(Date.parse(thisWeek + 'T00:00:00Z') - 21 * DAY)) + 'T00:00:00');
+    return { weeks: weekly, trend: trendFit(full.map(w => [w.index, w.output_vs_capacity])), oee_trend: trendFit(full.map(w => [w.index, w.oee])),
+      overall: metrics(overallTot, capAll * periodWeeks), by_stage: byStage, downtime, costs,
+      issues: { open: S.issue_logs.filter(i => i.status === 'open').length, logged: issues.length },
+      opportunities: opportunities(byStage, downtime, costs, periodWeeks || 1) };
+  }
+
+  function costReport(since, recentFrom) {
+    const prod = new Map(), materials = {}, stageVar = {};
+    for (const j of S.jobs.filter(j => j.status === 'completed' && j.completed_at >= since)) {
+      const c = j.cost_snapshot; if (!c || j.qty_good <= 0) continue;
+      const it = item(j.item_id);
+      const p = prod.get(j.item_id) || { item_no: it.no, description: it.description, jobs: 0, units: 0, actual: 0, bc_value: 0, std: 0, recipe_std: 0, material: 0, conversion: 0, scrap: 0, last4: [0, 0], prev: [0, 0] };
+      p.jobs++; p.units += j.qty_good; p.scrap += j.qty_scrap; p.actual += c.total_cost; p.bc_value += c.bc_value;
+      p.std = c.output_unit_cost; p.recipe_std = c.std_unit_cost; p.material += c.variance.material_usage; p.conversion += c.variance.conversion;
+      const b = j.completed_at >= recentFrom ? p.last4 : p.prev; b[0] += c.total_cost; b[1] += j.qty_good;
+      for (const m of c.materials) materials[m.item_no] = (materials[m.item_no] || 0) + m.variance;
+      for (const s of c.stages) stageVar[s.stage] = (stageVar[s.stage] || 0) + s.variance;
+      prod.set(j.item_id, p);
+    }
+    const rows = [...prod.values()].map(p => { const avg = p.actual / p.units;
+      return { item_no: p.item_no, description: p.description, jobs: p.jobs, units: p.units, scrap: p.scrap, avg_unit_cost: r2(avg),
+        bc_standard: r2(p.std), recipe_standard: r2(p.recipe_std), variance_pct: p.std ? r4((avg - p.std) / p.std) : null,
+        variance: r2(p.actual - p.bc_value), material_variance: r2(p.material), conversion_variance: r2(p.conversion),
+        recent_avg: p.last4[1] ? r2(p.last4[0] / p.last4[1]) : null, earlier_avg: p.prev[1] ? r2(p.prev[0] / p.prev[1]) : null }; })
+      .sort((a, b) => a.item_no.localeCompare(b.item_no));
+    const sorted = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, r2(v)]).sort((a, b) => b[1] - a[1]));
+    return { products: rows, total_variance: r2(rows.reduce((a, r) => a + r.variance, 0)),
+      material_variance_by_item: sorted(materials), conversion_variance_by_stage: sorted(stageVar) };
+  }
+
+  function opportunities(byStage, downtime, costs, weeks) {
+    const ops = [], annual = 52 / weeks;
+    const add = (area, title, detail, impact) => { if (impact > 1) ops.push({ area, title, detail, impact: r2(impact), annualised: Math.round(impact * annual) }); };
+    const pct = x => Math.round(x * 100) + '%';
+    for (const [st, v] of Object.entries(costs.conversion_variance_by_stage)) {
+      const s = byStage.find(x => x.stage === st), perf = s ? s.performance : null;
+      if (v > 0) add('Labour', `${st} runs slower than standard`, perf ? `Performance ${pct(perf)} of standard time. Review method, fixtures and the standard minutes in the recipe.` : 'Review method and the standard minutes in the recipe.', v);
+    }
+    for (const d of downtime.slice(0, 4)) add('Downtime', `${d.category[0].toUpperCase() + d.category.slice(1)} at ${d.stage}`, `${d.hours.toFixed(1)} h lost across ${d.count} logged issues. Target the root cause on the Issues log.`, d.cost);
+    for (const [no, v] of Object.entries(costs.material_variance_by_item).slice(0, 3)) if (v > 0) add('Material', `${no} used above standard`, 'Scrap and over-use against the recipe. Check nesting, cut lists and scrap reasons.', v);
+    for (const p of costs.products) {
+      if (p.bc_standard && Math.abs(p.recipe_standard - p.bc_standard) / p.bc_standard > 0.02) {
+        add('Standards', `Update BC standard cost for ${p.item_no}`, `Recipe works out at ${p.recipe_standard.toFixed(2)} vs BC ${p.bc_standard.toFixed(2)}. Inventory and margins are misstated until BC is updated.`, Math.abs((p.recipe_standard - p.bc_standard) * p.units));
+      }
+    }
+    const oees = byStage.filter(s => s.oee != null);
+    if (oees.length) {
+      const avg = oees.reduce((a, s) => a + s.oee, 0) / oees.length, worst = oees.reduce((a, s) => (s.oee < a.oee ? s : a));
+      if (worst.oee < avg - 0.05) add('OEE', `Lift ${worst.stage} OEE to the shop average`, `${worst.stage} OEE ${pct(worst.oee)} vs ${pct(avg)} average (availability ${pct(worst.availability)}, performance ${pct(Math.min(worst.performance, 1))}, quality ${pct(worst.quality)}).`, (avg - worst.oee) * worst.worked_hours * worst.rate_per_hour);
+    }
+    return ops.sort((a, b) => b.impact - a.impact);
+  }
+
   // ------------------------------------------------------------------ mock BC
   function syncItems() {
     const pending = {};
@@ -382,24 +565,31 @@
     let created = 0, updated = 0;
     for (const bi of S.bc.items) {
       let it = S.items.find(i => i.no === bi.no);
-      if (!it) { it = add('items', { no: bi.no, item_type: { 'FG-': 'finished', 'SA-': 'sub' }[bi.no.slice(0, 3)] || 'raw', lot_tracked: false, unit_cost: 0 }); created++; } else updated++;
+      if (!it) { it = add('items', { no: bi.no, item_type: { 'FG-': 'finished', 'SA-': 'sub' }[bi.no.slice(0, 3)] || 'raw', lot_tracked: false, unit_cost: 0, vendor_no: '', vendor_name: '', lead_time_days: 7 }); created++; } else updated++;
       it.description = bi.description; it.uom = bi.uom;
       if (bi.unit_cost || !it.unit_cost) it.unit_cost = bi.unit_cost;
+      if (bi.vendor_no) Object.assign(it, { vendor_no: bi.vendor_no, vendor_name: bi.vendor_name, lead_time_days: bi.lead_time_days });
       it.qty_on_hand = bi.inventory + (pending[bi.no] || 0);
       it.bc_synced_at = now();
     }
     return { created, updated };
   }
   function syncDemand() {
+    // new customer orders arrive with each pull (two at a time)
+    for (let k = 0; k < 2 && S.bc.incoming.length; k++) {
+      const o = S.bc.incoming.shift();
+      if ('due_in_days' in o) { o.due_date = today(o.due_in_days); delete o.due_in_days; }
+      S.bc.demand.push(o);
+    }
     let created = 0, updated = 0, skipped = 0, closed = 0; const seen = new Set();
     for (const line of S.bc.demand) {
       const it = S.items.find(i => i.no === line.item_no);
       if (!it) { skipped++; continue; }
       seen.add(line.reference);
       const d = S.demands.find(x => x.source === 'bc' && x.reference === line.reference);
-      const due = today(line.due_in_days ?? 14);
-      if (d) { if (d.status === 'open') { Object.assign(d, { qty: line.qty, due_date: due, item_id: it.id }); updated++; } }
-      else { add('demands', { item_id: it.id, qty: line.qty, due_date: due, source: 'bc', reference: line.reference, status: 'open', created_at: now() }); created++; }
+      const due = line.due_date || today(line.due_in_days ?? 14);
+      if (d) { if (d.status === 'open') { Object.assign(d, { qty: line.qty, due_date: due, item_id: it.id, customer: line.customer || d.customer }); updated++; } }
+      else { add('demands', { item_id: it.id, qty: line.qty, due_date: due, source: 'bc', reference: line.reference, customer: line.customer || '', status: 'open' }); created++; }
     }
     for (const d of S.demands.filter(d => d.source === 'bc' && d.status === 'open' && !seen.has(d.reference))) { d.status = 'cancelled'; closed++; }
     return { created, updated, closed, skipped_unknown_items: skipped };
@@ -412,7 +602,6 @@
       if (!bi) { p.status = 'failed'; p.error = `Item ${p.item_no} not found in BC`; failed++; continue; }
       const sign = p.kind === 'consumption' ? -1 : 1;
       bi.inventory += sign * p.qty;
-      S.bc.journal.push({ entry_no: S.bc.journal.length + 1, kind: p.kind, document_no: p.document_no, item_no: p.item_no, qty: p.qty, value: r4(sign * p.qty * bi.unit_cost) });
       p.status = 'posted'; p.error = ''; p.posted_at = now(); posted++;
     }
     return { posted, failed };
@@ -421,7 +610,8 @@
   // ------------------------------------------------------------------ serializers
   const ser = {
     item: i => ({ id: i.id, no: i.no, description: i.description, item_type: i.item_type, uom: i.uom, unit_cost: i.unit_cost,
-      qty_on_hand: i.qty_on_hand, lot_tracked: !!i.lot_tracked, bc_synced_at: i.bc_synced_at || null }),
+      qty_on_hand: i.qty_on_hand, lot_tracked: !!i.lot_tracked, vendor_no: i.vendor_no || '', vendor_name: i.vendor_name || '',
+      lead_time_days: i.lead_time_days ?? 7, bc_synced_at: i.bc_synced_at || null }),
     stage: s => ({ ...s }),
     recipe: r => {
       const it = item(r.item_id);
@@ -438,7 +628,7 @@
         qty: j.qty, status: j.status, due_date: j.due_date, demand_id: j.demand_id, qty_good: j.qty_good, qty_scrap: j.qty_scrap,
         created_at: j.created_at, completed_at: j.completed_at,
         costs: j.status === 'completed' && j.cost_snapshot ? j.cost_snapshot : jobCosts(j),
-        operations: j.operations.map(o => { const s = stage(o.stage_id); return { ...o, stage_code: s.code, stage_name: s.name, color: s.color, actual_minutes: Math.round(o.actual_minutes * 100) / 100 }; }) };
+        operations: j.operations.map(o => { const s = stage(o.stage_id); return { ...o, stage_code: s.code, stage_name: s.name, color: s.color, actual_minutes: r2(o.actual_minutes) }; }) };
       if (detail) {
         out.issues = jobIssues(j).map(i => { const ii = item(i.item_id), l = i.lot_id ? byId('lots', i.lot_id) : null;
           return { item_no: ii.no, description: ii.description, qty: i.qty, lot_id: i.lot_id, lot_no: l ? l.lot_no : '', heat_no: l ? l.heat_no : '',
@@ -447,11 +637,19 @@
       return out;
     },
     lot: l => { const it = item(l.item_id); return { ...l, item_no: it.no, description: it.description, uom: it.uom }; },
+    issueLog: i => { const j = i.job_id ? byId('jobs', i.job_id) : null;
+      return { ...i, job: j ? j.number : null, item_no: j ? item(j.item_id).no : null, stage: i.stage_id ? stage(i.stage_id).name : null }; },
+    note: n => ({ ...n, stage: n.stage_id ? stage(n.stage_id).name : null }),
+    pr: pr => { const lines = pr.lines.map(l => { const it = item(l.item_id);
+        return { id: l.id, item_id: l.item_id, item_no: it.no, description: it.description, uom: it.uom, qty: l.qty, unit_cost: l.unit_cost,
+          value: r2(l.qty * l.unit_cost), needed_by: l.needed_by, lot_tracked: !!it.lot_tracked }; });
+      return { ...pr, lines, value: r2(lines.reduce((a, l) => a + l.value, 0)) }; },
   };
 
   // ------------------------------------------------------------------ routes
   function getJob(id) { return byId('jobs', id) || fail(404, 'Job not found'); }
   const num = v => (v === '' || v == null ? null : Number(v));
+  const getPr = id => byId('purchase_requests', id) || fail(404, 'Purchase request not found');
 
   function route(method, path, q, body) {
     let m;
@@ -460,18 +658,18 @@
       if (!body.no) fail(422, 'Item number is required');
       if (S.items.some(i => i.no === body.no)) fail(409, 'Item number already exists');
       return ser.item(add('items', { no: body.no, description: body.description || '', item_type: body.item_type || 'raw', uom: body.uom || 'EA',
-        unit_cost: +body.unit_cost || 0, qty_on_hand: +body.qty_on_hand || 0, lot_tracked: !!body.lot_tracked }));
+        unit_cost: +body.unit_cost || 0, qty_on_hand: +body.qty_on_hand || 0, lot_tracked: !!body.lot_tracked, vendor_no: '', vendor_name: '', lead_time_days: 7 }));
     }
     if (method === 'PATCH' && (m = path.match(/^\/items\/(\d+)$/))) {
       const it = item(+m[1]) || fail(404, 'Not found');
-      for (const k of ['description', 'item_type', 'uom', 'unit_cost', 'lot_tracked']) if (k in body) it[k] = body[k];
+      for (const k of ['description', 'item_type', 'uom', 'unit_cost', 'lot_tracked', 'vendor_no', 'vendor_name', 'lead_time_days']) if (k in body) it[k] = body[k];
       return ser.item(it);
     }
     if (method === 'GET' && path === '/stages') return [...S.stages].sort((a, b) => a.sequence - b.sequence).map(ser.stage);
-    if (method === 'POST' && path === '/stages') return ser.stage(add('stages', { code: body.code, name: body.name, sequence: +body.sequence || 10, rate_per_hour: +body.rate_per_hour || 0, color: body.color || '#64748b' }));
+    if (method === 'POST' && path === '/stages') return ser.stage(add('stages', { code: body.code, name: body.name, sequence: +body.sequence || 10, rate_per_hour: +body.rate_per_hour || 0, capacity_hours_per_day: +body.capacity_hours_per_day || 7.6, color: body.color || '#64748b' }));
     if (method === 'PATCH' && (m = path.match(/^\/stages\/(\d+)$/))) {
       const s = stage(+m[1]) || fail(404, 'Not found');
-      for (const k of ['name', 'sequence', 'rate_per_hour', 'color']) if (k in body) s[k] = body[k];
+      for (const k of ['name', 'sequence', 'rate_per_hour', 'capacity_hours_per_day', 'color']) if (k in body) s[k] = body[k];
       return ser.stage(s);
     }
     if (method === 'GET' && path === '/recipes') return S.recipes.map(ser.recipe);
@@ -485,14 +683,13 @@
         if (c.operation_seq != null && !seqs.has(c.operation_seq)) fail(422, `Component consumed at operation ${c.operation_seq}, which doesn't exist`);
         if (c.item_id === body.item_id) fail(422, "A recipe can't consume its own output");
       }
-      const snapshot = JSON.stringify(S);
       const r = m ? byId('recipes', +m[1]) || fail(404, 'Not found') : add('recipes', {});
       Object.assign(r, { item_id: body.item_id, version: body.version || '1', output_qty: body.output_qty, std_batch_qty: body.std_batch_qty ?? null,
         active: body.active !== false, notes: body.notes || '',
-        operations: body.operations.map(o => ({ id: nextId('recipe_operations'), ...o })),
-        components: body.components.map(c => ({ id: nextId('recipe_components'), scrap_pct: 0, operation_seq: null, ...c })) });
+        operations: body.operations.map(o => ({ id: nextId('recipe_operations'), recipe_id: r.id, ...o })),
+        components: body.components.map(c => ({ id: nextId('recipe_components'), recipe_id: r.id, scrap_pct: 0, operation_seq: null, ...c })) });
       if (r.active) S.recipes.filter(o => o.item_id === r.item_id && o.id !== r.id).forEach(o => { o.active = false; });
-      try { lowLevelCodes(activeRecipes()); } catch (e) { S = JSON.parse(snapshot); throw e; }
+      lowLevelCodes(activeRecipes());
       const it = item(r.item_id); if (it.item_type === 'raw') it.item_type = 'sub';
       return ser.recipe(r);
     }
@@ -504,7 +701,7 @@
     if (method === 'POST' && path === '/demand') {
       if (!item(body.item_id)) fail(404, 'Item not found');
       if (!(body.qty > 0)) fail(422, 'Quantity must be more than 0');
-      return ser.demand(add('demands', { item_id: body.item_id, qty: body.qty, due_date: body.due_date || null, source: 'manual', reference: body.reference || '', status: 'open', created_at: now() }));
+      return ser.demand(add('demands', { item_id: body.item_id, qty: body.qty, due_date: body.due_date || null, source: 'manual', reference: body.reference || '', customer: '', status: 'open' }));
     }
     if (method === 'POST' && (m = path.match(/^\/demand\/(\d+)\/cancel$/))) { const d = byId('demands', +m[1]) || fail(404, 'Demand not found'); d.status = 'cancelled'; return ser.demand(d); }
     if (method === 'POST' && (m = path.match(/^\/demand\/(\d+)\/create-job$/))) {
@@ -521,9 +718,19 @@
     if (method === 'POST' && path === '/jobs') return ser.job(createJob(body.item_id, body.qty, body.due_date || null), true);
     if (method === 'GET' && (m = path.match(/^\/jobs\/(\d+)$/))) {
       const j = getJob(+m[1]); const out = ser.job(j, true);
-      out.events = S.events.filter(e => e.job_id === j.id).sort((a, b) => b.id - a.id)
+      out.events = S.events.filter(e => e.job_id === j.id).sort(byTimeDesc)
         .map(e => ({ action: e.action, qty: e.qty, minutes: e.minutes, operator: e.operator, note: e.note, stage: e.stage_id ? stage(e.stage_id).name : null, created_at: e.created_at }));
+      out.notes = S.notes.filter(n => n.job_id === j.id).sort(byTimeDesc).map(ser.note);
+      out.issue_logs = S.issue_logs.filter(i => i.job_id === j.id).sort(byTimeDesc).map(ser.issueLog);
       return out;
+    }
+    if ((m = path.match(/^\/jobs\/(\d+)\/notes$/))) {
+      const j = getJob(+m[1]);
+      if (method === 'GET') return S.notes.filter(n => n.job_id === j.id).sort(byTimeDesc).map(ser.note);
+      if (!body.note || !body.note.trim()) fail(422, 'Write a short note first');
+      const op = body.operation_id ? getOp(j, body.operation_id) : null;
+      return ser.note(add('notes', { job_id: j.id, job_operation_id: op ? op.id : null, stage_id: op ? op.stage_id : null,
+        note: body.note.slice(0, 300), detail: body.detail || '', operator: body.operator || '' }));
     }
     if (method === 'POST' && (m = path.match(/^\/jobs\/(\d+)\/(release|start|complete|scrap|issue|finish|cancel)$/))) {
       const j = getJob(+m[1]), act = m[2], who = body.operator ?? q.get('operator') ?? '';
@@ -543,6 +750,8 @@
     if (method === 'GET' && path === '/wip') {
       const board = new Map([...S.stages].sort((a, b) => a.sequence - b.sequence).map(s => [s.id, { ...s, queued: 0, in_process: 0, jobs: [] }]));
       const jobs = S.jobs.filter(j => ['released', 'in_progress'].includes(j.status));
+      const openIssues = new Map(); for (const i of S.issue_logs) if (i.status === 'open' && i.job_operation_id) openIssues.set(i.job_operation_id, (openIssues.get(i.job_operation_id) || 0) + 1);
+      const noteCount = new Map(); for (const n of S.notes) noteCount.set(n.job_id, (noteCount.get(n.job_id) || 0) + 1);
       for (const j of jobs) {
         for (const op of j.operations) {
           if (op.qty_queued <= EPS && op.qty_in_process <= EPS) continue;
@@ -555,7 +764,8 @@
           }
           col.jobs.push({ job_id: j.id, number: j.number, item_no: item(j.item_id).no, description: item(j.item_id).description, job_qty: j.qty,
             due_date: j.due_date, operation_id: op.id, sequence: op.sequence, is_last: op === j.operations[j.operations.length - 1],
-            qty_queued: op.qty_queued, qty_in_process: op.qty_in_process, qty_done: op.qty_done, qty_scrap: op.qty_scrap, materials: [...mats.values()] });
+            qty_queued: op.qty_queued, qty_in_process: op.qty_in_process, qty_done: op.qty_done, qty_scrap: op.qty_scrap, materials: [...mats.values()],
+            open_issues: openIssues.get(op.id) || 0, notes: noteCount.get(j.id) || 0 });
         }
       }
       return { stages: [...board.values()], awaiting_finish: jobs.filter(j => j.status === 'in_progress' && unitsRemaining(j) <= EPS)
@@ -564,12 +774,53 @@
     if (method === 'GET' && path === '/wip/value') {
       const rows = S.jobs.filter(j => ['released', 'in_progress'].includes(j.status)).map(j => { const c = jobCosts(j);
         return { number: j.number, item_no: item(j.item_id).no, total_cost: c.total_cost, output_value: c.bc_value, wip: r4(c.total_cost - c.bc_value) }; });
-      return { jobs: rows, total: Math.round(rows.reduce((a, r) => a + r.wip, 0) * 100) / 100 };
+      return { jobs: rows, total: r2(rows.reduce((a, r) => a + r.wip, 0)) };
     }
     if (method === 'GET' && path === '/events') {
-      return [...S.events].sort((a, b) => b.id - a.id).slice(0, +(q.get('limit') || 50)).map(e => { const j = byId('jobs', e.job_id);
+      return [...S.events].sort(byTimeDesc).slice(0, +(q.get('limit') || 50)).map(e => { const j = byId('jobs', e.job_id);
         return { job: j.number, item_no: item(j.item_id).no, action: e.action, qty: e.qty, stage: e.stage_id ? stage(e.stage_id).name : null, operator: e.operator, note: e.note, created_at: e.created_at }; });
     }
+    // issue log
+    if (method === 'GET' && path === '/issues') {
+      const st = q.get('status'), sid = num(q.get('stage_id')), jid = num(q.get('job_id')), cat = q.get('category');
+      return S.issue_logs.filter(i => (!st || i.status === st) && (!sid || i.stage_id === sid) && (!jid || i.job_id === jid) && (!cat || i.category === cat))
+        .sort(byTimeDesc).slice(0, +(q.get('limit') || 300)).map(ser.issueLog);
+    }
+    if (method === 'POST' && path === '/issues') {
+      if (!body.title || !body.title.trim()) fail(422, 'Say what happened first');
+      let stageId = body.stage_id || null;
+      if (body.job_id) { const j = getJob(body.job_id); if (body.operation_id) stageId = getOp(j, body.operation_id).stage_id; }
+      return ser.issueLog(add('issue_logs', { number: 'ISS' + String((S.seq.issue_logs || 0) + 1).padStart(5, '0'), job_id: body.job_id || null,
+        job_operation_id: body.operation_id || null, stage_id: stageId, category: body.category || 'other', severity: body.severity || 'medium',
+        title: body.title.slice(0, 200), detail: body.detail || '', minutes_lost: +body.minutes_lost || 0, qty_affected: +body.qty_affected || 0,
+        operator: body.operator || '', status: 'open', resolution: '', resolved_at: null }));
+    }
+    if (method === 'POST' && (m = path.match(/^\/issues\/(\d+)\/resolve$/))) {
+      const i = byId('issue_logs', +m[1]) || fail(404, 'Issue not found');
+      Object.assign(i, { status: 'resolved', resolution: body.resolution || '', resolved_at: now() });
+      return ser.issueLog(i);
+    }
+    // purchasing
+    if (method === 'GET' && path === '/materials/availability') return availability();
+    if (method === 'GET' && path === '/purchase-requests') {
+      const st = q.get('status');
+      return S.purchase_requests.filter(p => !st || st.split(',').includes(p.status)).sort((a, b) => b.id - a.id).map(ser.pr);
+    }
+    if (method === 'POST' && path === '/purchase-requests/from-shortages') return prFromShortages(q.get('operator')).map(ser.pr);
+    if (method === 'POST' && (m = path.match(/^\/purchase-requests\/(\d+)\/(line|send|receive|cancel)$/))) {
+      const pr = getPr(+m[1]);
+      if (m[2] === 'line') {
+        if (pr.status !== 'draft') fail(409, 'Only draft requests can be changed');
+        const l = pr.lines.find(x => x.id === body.line_id) || fail(409, 'Line not found');
+        if (+body.qty <= 0) pr.lines = pr.lines.filter(x => x !== l); else l.qty = +body.qty;
+      }
+      if (m[2] === 'send') prSend(pr);
+      if (m[2] === 'receive') prReceive(pr, body.heat_numbers);
+      if (m[2] === 'cancel') { if (pr.status !== 'draft') fail(409, 'Only drafts can be cancelled here; cancel a sent PO in BC'); pr.status = 'cancelled'; }
+      return ser.pr(pr);
+    }
+    if (method === 'GET' && path === '/reports/performance') return performanceReport(Math.max(2, Math.min(+(q.get('weeks') || 10), 52)));
+    // lots
     if (method === 'GET' && path === '/lots') {
       const term = (q.get('q') || '').toLowerCase(), itemId = num(q.get('item_id')), avail = q.get('available') === 'true';
       return S.lots.filter(l => {
@@ -577,7 +828,7 @@
         if (term && ![l.lot_no, l.heat_no, it.no, l.cert_ref, l.supplier].some(v => (v || '').toLowerCase().includes(term))) return false;
         if (itemId && l.item_id !== itemId) return false;
         return !avail || l.qty_on_hand > EPS;
-      }).sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id).map(ser.lot);
+      }).sort(byTimeDesc).slice(0, +(q.get('limit') || 200)).map(ser.lot);
     }
     if (method === 'POST' && path === '/lots') {
       if (!item(body.item_id)) fail(404, 'Item not found');
@@ -591,6 +842,7 @@
       const l = byId('lots', +m[1]) || fail(404, 'Lot not found');
       return { lot: ser.lot(l), backward: backward(l), forward: forward(l) };
     }
+    // BC
     if (method === 'GET' && path === '/bc/status') {
       const postings = {}; for (const p of S.postings) postings[p.status] = (postings[p.status] || 0) + 1;
       return { mode: 'mock', postings };
@@ -614,13 +866,15 @@
     const u = new URL(url, 'http://demo.local');
     const method = (init.method || 'GET').toUpperCase();
     const body = init.body ? JSON.parse(init.body) : {};
-    const snapshot = JSON.stringify(S);
+    const snapshot = method === 'GET' ? null : JSON.stringify(S);
+    issuesByJob = null;
     try {
       const data = route(method, u.pathname.slice(4), u.searchParams, body);
       if (method !== 'GET') save();
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } catch (e) {
-      S = JSON.parse(snapshot); // roll back, like a failed DB transaction
+      if (snapshot) S = JSON.parse(snapshot); // roll back, like a failed DB transaction
+      issuesByJob = null;
       if (!(e instanceof ApiError)) console.error(e);
       const status = e instanceof ApiError ? e.status : 500;
       return new Response(JSON.stringify({ detail: e instanceof ApiError ? e.detail : String(e.message || e) }), { status, headers: { 'Content-Type': 'application/json' } });

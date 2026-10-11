@@ -26,7 +26,17 @@ material to costed finished goods:
    time at each stage multiplied by its hourly rate. Closing the job freezes
    actual cost and the variance against what BC booked, broken down by
    material, stage and standard.
-8. **Lot / heat traceability.** Received lots carry heat number, supplier and
+8. **Purchasing.** Material availability (on hand, allocated to open jobs,
+   on order, shortfall) and purchase requests raised per vendor from the plan's
+   shortages. **Send to BC** creates the purchase order in Business Central.
+   Open requests count as supply, so a shortage is never bought twice.
+9. **Issue log and operator notes.** Breakdowns, changeovers, quality and
+   material problems are logged against a job and stage with minutes lost;
+   operators add notes (with optional detail) from the shop-floor card.
+10. **Reports.** OEE (availability x performance x quality) by week and stage,
+   output vs capacity with a trend line, average actual cost vs standard per
+   product, downtime by cause and ranked opportunities for improvement.
+11. **Lot / heat traceability.** Received lots carry heat number, supplier and
    mill cert. Every issue records its lot, and every job's output is a lot, so
    you can trace a finished lot back to the steel heat, or a heat forward to
    every finished lot it went into.
@@ -46,7 +56,8 @@ material to costed finished goods:
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m app.seed                 # demo stages, items, recipes, BC demand (mock BC)
+python -m app.seed --trial         # trial data: 10 weeks of history, 20 open jobs (mock BC)
+# or: python -m app.seed           # minimal starter data
 uvicorn app.main:app --reload      # http://localhost:8000
 pytest                             # tests
 ```
@@ -78,6 +89,36 @@ needed. Data is kept in that browser; **Reset demo data** starts over. The
 Python app in `app/` is the real implementation, so keep `mockserver.js` in
 step when its behaviour changes.
 
+## Trial data
+
+`python -m app.seed --trial` (see `app/trial_data.py`) builds a small fabrication
+shop: 6 stages with rates and capacity, 14 raw materials from 7 vendors, 3
+sub-assemblies and 5 products. It then runs ten weeks of history through the
+real production services with a simulated clock:
+
+- 50+ completed jobs, with stage times improving over the period, scrap,
+  downtime and quality issues, operator notes, and purchase orders received
+  as material ran low;
+- 20 open jobs spread across the stages, some with open issues;
+- open BC sales orders (some not yet planned), and a queue of new orders that
+  arrive two at a time each time demand is pulled from BC;
+- one purchase order on order and four raw materials deliberately short.
+
+It's deterministic, so every run tells the same story: Powder coating
+availability and Pressing performance are the weak spots, output vs capacity
+climbs as volume grows, and some BC standard costs are out of date.
+
+## OEE and capacity definitions
+
+Per stage and week, from the shop-floor log and issue log:
+
+- **Availability** = worked time / (worked time + downtime logged on issues)
+- **Performance** = standard minutes for all units processed / worked time (capped at 100% in OEE)
+- **Quality** = standard minutes of good output / standard minutes of all units processed
+- **OEE** = availability x performance x quality
+- **Output vs capacity** = standard hours of good output / available hours
+  (stage hours per day x 5 days)
+
 ## Connecting to the real Business Central
 
 Set `BC_MODE=live` and the following (see `.env.example`):
@@ -96,6 +137,10 @@ What it reads and writes:
 - **Reads** use standard API v2.0: `items` (number, description, base UoM,
   unit cost, inventory) and `salesOrders` with `salesOrderLines` (outstanding
   quantity, shipment date).
+- **Purchase orders** are created with standard API v2.0 `purchaseOrders` and
+  `purchaseOrderLines` (vendor, item, quantity, unit cost, expected receipt date).
+  BC's API doesn't expose an item's vendor, so vendor and lead time are kept per
+  item in this tool (the Items screen).
 - **Writes** create item journal lines: consumption as *Negative Adjmt.*,
   finished output as *Positive Adjmt.*, one line per completion. Items are on
   **Standard** costing, so no amount is sent: BC values both at standard cost.

@@ -132,3 +132,7 @@ ul.tree li { margin: 4px 0; padding-left: 10px; border-left: 2px solid var(--lin
 .sw.dash { border-top-style: dashed; } .sw.ref { border-color: var(--muted); border-top-style: dotted; }
 .tip { position: absolute; width: 190px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
        padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); pointer-events: none; display: flex; flex-direction: column; gap: 2px; }
+@media (max-width: 640px) {
+  .apq { flex-wrap: nowrap; gap: 8px; }
+  .apq .meter { display: none; }
+}
