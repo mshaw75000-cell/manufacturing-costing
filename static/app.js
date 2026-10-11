@@ -420,6 +420,81 @@ const views = {
     bindTrendHover(r.weeks);
   },
 
+  async assumptions() {
+    const [a, recipes] = await Promise.all([api('/assumptions'), api('/recipes')]);
+    const st = a.settings;
+    const elems = ['material', ...a.elements];
+    const field = (s, key, label, step = 'any', suffix = '') => `<label>${label}<span class="inp">
+      <input type="number" min="0" step="${step}" value="${s[key] ?? 0}" data-assume="${s.id}:${key}" id="as-${s.id}-${key}">${suffix ? `<span class="muted">${suffix}</span>` : ''}</span></label>`;
+    const basis = (s, k) => {
+      const kwh = s.machine_kw * s.power_load_pct / 100;
+      return {
+        labour: `${num(s.crew_size)} ${s.crew_size === 1 ? 'person' : 'people'} × ${money(s.labour_rate)}`,
+        electricity: `${num(s.machine_kw)} kW × ${num(s.power_load_pct)}% = ${num(kwh, 2)} kWh × ${money(st.electricity_per_kwh)}`,
+        gas: 'per running hour', consumables: 'per running hour', maintenance: 'per running hour',
+        depreciation: s.machine_cost && s.machine_life_years ? `${money(s.machine_cost)} ÷ ${num(s.machine_life_years)} yrs ÷ ${num(s.annual_hours)} h` : 'no machine cost entered',
+        overhead: 'rent, supervision, admin share',
+      }[k];
+    };
+    view.innerHTML = `
+      <div class="panel">
+        <h2>Costing assumptions</h2>
+        <p class="small muted" style="margin:0 0 10px;max-width:70ch">Each process has an hourly rate built from the assumptions below. That rate costs every
+          minute of stage time in job actual costs and in recipe standard costs. Changing an assumption updates the rates straight away;
+          BC standard costs only change when they're updated in Business Central.</p>
+        <div class="row">${Object.entries(a.labels).map(([k, label]) => `<label>${esc(label)}<input type="number" min="0" step="any" value="${st[k]}" data-setting="${k}" id="set-${k}" style="width:120px"></label>`).join('')}</div>
+      </div>
+      <div class="panel">
+        <h2>Hourly rate by process</h2>
+        <div class="legend">${a.elements.map(e => `<span><i class="sq el-${e}"></i>${e}</span>`).join('')}</div>
+        <table><tr><th>Process</th><th class="n">Rate / hour</th><th style="width:45%"></th><th class="n">Electricity / h</th><th class="n">Hours / year</th><th class="n">Cost / year at capacity</th></tr>
+          ${a.stages.map(s => { const tot = Object.values(s.breakdown).reduce((x, y) => x + y, 0) || 1;
+            const maxRate = Math.max(...a.stages.map(x => x.rate_per_hour)) || 1;
+            return `<tr><td><span class="dot" style="background:${esc(s.color)}"></span>${esc(s.name)}</td><td class="n"><b>${money(s.rate_per_hour)}</b></td>
+            <td class="stack-cell"><span class="stack" style="width:${Math.max(4, s.rate_per_hour / maxRate * 100)}%">${a.elements.filter(e => s.breakdown[e] > 0).map(e =>
+              `<span class="el-${e}" style="flex:${s.breakdown[e] / tot}" title="${e} ${money(s.breakdown[e])}/h"></span>`).join('')}</span></td>
+            <td class="n">${money(s.breakdown.electricity)}</td><td class="n">${num(s.annual_hours)}</td><td class="n">${money(s.annual_cost_at_capacity)}</td></tr>`; }).join('')}
+        </table>
+      </div>
+      ${a.stages.map(s => `
+      <div class="panel assume" id="stage-${s.id}">
+        <div class="row"><span class="dot" style="background:${esc(s.color)}"></span><h2 style="margin:0">${esc(s.name)}</h2>
+          ${s.rate_from_assumptions ? '<span class="tag ok">built from assumptions</span>' : '<span class="tag">rate entered manually · fill in below to build it up</span>'}
+          <span class="spacer"></span><span class="big-rate">${money(s.rate_per_hour)}<span class="small muted"> / hour</span></span></div>
+        <div class="assume-grid">
+          <fieldset><legend>People</legend>${field(s, 'crew_size', 'Crew size', '0.5', 'people')}${field(s, 'labour_rate', 'Labour rate incl. on-costs', '0.5', '$ / person-hour')}</fieldset>
+          <fieldset><legend>Energy</legend>${field(s, 'machine_kw', 'Machine power', '0.5', 'kW')}${field(s, 'power_load_pct', 'Average load', '5', '% of rated')}${field(s, 'gas_per_hour', 'Gas', '0.5', '$ / hour')}</fieldset>
+          <fieldset><legend>Machine</legend>${field(s, 'machine_cost', 'Machine cost', '1000', '$')}${field(s, 'machine_life_years', 'Useful life', '1', 'years')}${field(s, 'maintenance_per_hour', 'Maintenance', '0.5', '$ / hour')}${field(s, 'consumables_per_hour', 'Consumables', '0.5', '$ / hour')}</fieldset>
+          <fieldset><legend>Overhead &amp; capacity</legend>${field(s, 'overhead_per_hour', 'Overhead', '0.5', '$ / hour')}${field(s, 'capacity_hours_per_day', 'Available hours', '0.1', 'per day')}</fieldset>
+        </div>
+        <div class="assume-out">
+          <table><tr><th>Element</th><th>Basis</th><th class="n">$ / hour</th><th class="n">Share</th></tr>
+            ${a.elements.map(e => `<tr><td><i class="sq el-${e}"></i>${e}</td><td class="small muted">${esc(basis(s, e))}</td>
+              <td class="n">${money(s.breakdown[e])}</td><td class="n small">${s.rate_per_hour ? Math.round(s.breakdown[e] / s.rate_per_hour * 100) + '%' : ''}</td></tr>`).join('')}
+            <tr><td><b>Rate</b></td><td></td><td class="n"><b>${money(s.rate_per_hour)}</b></td><td></td></tr></table>
+          <label>Notes<textarea rows="3" data-assume="${s.id}:assumption_notes" id="as-${s.id}-notes" placeholder="Where the numbers come from">${esc(s.assumption_notes)}</textarea></label>
+        </div>
+      </div>`).join('')}
+      <div class="panel">
+        <h2>Standard cost per unit by element</h2>
+        <div class="small muted" style="margin-bottom:8px">From each recipe at the rates above. Sub-assemblies are in material at their BC standard cost.</div>
+        <div class="legend">${elems.map(e => `<span><i class="sq el-${e}"></i>${e}</span>`).join('')}</div>
+        <table><tr><th>Product</th>${elems.map(e => `<th class="n">${e}</th>`).join('')}<th class="n">Total</th></tr>
+          ${recipes.filter(r => r.active).map(r => `<tr><td>${esc(r.item_no)}<div class="small muted">${esc(r.item_description)}</div>
+            <span class="stack" style="width:100%">${elems.filter(e => r.standard_breakdown[e] > 0).map(e => `<span class="el-${e}" style="flex:${r.standard_breakdown[e]}" title="${e} ${money(r.standard_breakdown[e])}"></span>`).join('')}</span></td>
+            ${elems.map(e => `<td class="n">${money(r.standard_breakdown[e])}</td>`).join('')}<td class="n"><b>${money(r.standard_unit_cost)}</b></td></tr>`).join('')}
+        </table>
+      </div>`;
+    view.querySelectorAll('[data-setting]').forEach(i => i.onchange = () => guarded(async () => {
+      await api('/assumptions/settings', { method: 'PATCH', body: { [i.dataset.setting]: +i.value } }); toast('Rates updated'); keepScroll(render);
+    }));
+    view.querySelectorAll('[data-assume]').forEach(i => i.onchange = () => guarded(async () => {
+      const [id, key] = i.dataset.assume.split(':');
+      await api(`/stages/${id}/assumptions`, { method: 'PATCH', body: { [key]: key === 'assumption_notes' ? i.value : +i.value } });
+      toast(key === 'assumption_notes' ? 'Notes saved' : 'Rate updated'); keepScroll(render);
+    }));
+  },
+
   async recipes() {
     const recipes = await api('/recipes');
     view.innerHTML = `
@@ -491,10 +566,10 @@ const views = {
     const [items, stages] = await Promise.all([api('/items'), api('/stages')]);
     view.innerHTML = `
       <div class="panel">
-        <div class="row"><h2 style="margin:0">Stages</h2><span class="muted small">Rate = labour + overhead per hour, used to cost time at each stage</span></div>
+        <div class="row"><h2 style="margin:0">Stages</h2><span class="muted small">Rate per hour costs time at each stage. Rates built from assumptions are edited on the Assumptions page.</span></div>
         <table style="margin-top:8px"><tr><th>Seq</th><th>Code</th><th>Name</th><th class="n">Rate / hour</th><th class="n">Hours / day</th><th>Colour</th></tr>
           ${stages.map(s => `<tr><td>${s.sequence}</td><td>${esc(s.code)}</td><td>${esc(s.name)}</td>
-            <td class="n"><input type="number" step="any" value="${s.rate_per_hour}" data-rate="${s.id}" style="width:90px"></td>
+            <td class="n">${s.rate_from_assumptions ? `<a href="#" data-goassume>${money(s.rate_per_hour)}</a>` : `<input type="number" step="any" value="${s.rate_per_hour}" data-rate="${s.id}" style="width:90px">`}</td>
             <td class="n"><input type="number" step="any" value="${s.capacity_hours_per_day}" data-cap="${s.id}" style="width:80px" title="Available hours per working day: shifts x people or machines"></td>
             <td><input type="color" value="${esc(s.color)}" data-color="${s.id}"></td></tr>`).join('')}
         </table>
@@ -522,6 +597,7 @@ const views = {
           <input name="unit_cost" type="number" step="any" placeholder="Unit cost" style="width:100px">
           <button class="btn">Add item (local only)</button></form>
       </div>`;
+    view.querySelectorAll('[data-goassume]').forEach(a => a.onclick = e => { e.preventDefault(); goTo('assumptions'); });
     view.querySelectorAll('[data-cap]').forEach(i => i.onchange = () => guarded(() => api(`/stages/${i.dataset.cap}`, { method: 'PATCH', body: { capacity_hours_per_day: +i.value } })));
     view.querySelectorAll('[data-rate]').forEach(i => i.onchange = () => guarded(() => api(`/stages/${i.dataset.rate}`, { method: 'PATCH', body: { rate_per_hour: +i.value } })));
     view.querySelectorAll('[data-color]').forEach(i => i.onchange = () => guarded(() => api(`/stages/${i.dataset.color}`, { method: 'PATCH', body: { color: i.value } })));
@@ -984,6 +1060,13 @@ async function render(live = false, msg = null) {
   } catch (e) {
     view.innerHTML = `<div class="panel" style="color:var(--bad)">${esc(e.message)}</div>`;
   }
+}
+
+// Re-render without jumping back to the top of the page.
+async function keepScroll(fn) {
+  const y = window.scrollY;
+  await fn();
+  window.scrollTo(0, y);
 }
 
 function goTo(viewName) {

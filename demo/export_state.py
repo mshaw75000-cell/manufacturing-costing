@@ -68,6 +68,7 @@ def export(now: datetime | None = None, with_reports: bool = False) -> dict:
         "postings": [{k: v for k, v in p.items() if k != "response"} for p in rows(M.BcPosting)],
         "issue_logs": rows(M.IssueLog), "notes": rows(M.JobNote), "purchase_requests": prs,
         "bc": bc_state,
+        "settings": __import__("app.services.assumptions", fromlist=["get_settings"]).get_settings(db),
     }
     seq = {k: max((r["id"] for r in v), default=0) for k, v in state.items() if isinstance(v, list)}
     seq["recipe_operations"] = max((o["id"] for r in recipes for o in r["operations"]), default=0)
@@ -83,7 +84,12 @@ def export(now: datetime | None = None, with_reports: bool = False) -> dict:
         open_job = db.scalar(select(M.Job).where(M.Job.status == "in_progress").order_by(M.Job.id))
         state["_python"] = json.loads(json.dumps({
             "plan": build_plan(db), "availability": availability(db), "report": performance_report(db),
-            "job": {"id": open_job.id, "costs": job_costs(open_job)}}, default=str))
+            "job": {"id": open_job.id, "costs": job_costs(open_job)},
+            "assumptions": __import__("app.services.assumptions", fromlist=["summary"]).summary(db),
+            "breakdowns": {r.item.no: __import__("app.services.assumptions", fromlist=["x"]).standard_breakdown(
+                r, __import__("app.services.costing", fromlist=["x"]).active_recipes(db),
+                __import__("app.services.assumptions", fromlist=["x"]).get_settings(db))
+                for r in db.scalars(select(M.Recipe))}}, default=str))
     return state
 
 

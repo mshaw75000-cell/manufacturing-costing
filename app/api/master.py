@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Item, Recipe, RecipeComponent, RecipeOperation, Stage
+from ..services import assumptions as A
 from ..services.costing import active_recipes as _active
 from ..services.planning import RecipeCycleError, _low_level_codes
 from . import serialize as S
@@ -80,6 +81,10 @@ def update_stage(stage_id: int, body: dict, db: Session = Depends(get_db)):
     for k in ("name", "sequence", "rate_per_hour", "capacity_hours_per_day", "color"):
         if k in body:
             setattr(s, k, body[k])
+    if "rate_per_hour" in body:
+        s.rate_from_assumptions = False  # a typed-in rate overrides the build-up
+    elif s.rate_from_assumptions:
+        A.recompute_rates(db)
     db.commit()
     return S.stage(s)
 
@@ -139,8 +144,8 @@ def _apply_recipe(db: Session, r: Recipe, body: RecipeIn):
 
 @router.get("/recipes")
 def list_recipes(db: Session = Depends(get_db)):
-    active = _active(db)
-    return [S.recipe(r, active) for r in db.scalars(select(Recipe).order_by(Recipe.id))]
+    active, settings = _active(db), A.get_settings(db)
+    return [S.recipe(r, active, settings) for r in db.scalars(select(Recipe).order_by(Recipe.id))]
 
 
 @router.get("/recipes/{recipe_id}")
@@ -148,7 +153,7 @@ def get_recipe(recipe_id: int, db: Session = Depends(get_db)):
     r = db.get(Recipe, recipe_id)
     if not r:
         _404()
-    return S.recipe(r, _active(db))
+    return S.recipe(r, _active(db), A.get_settings(db))
 
 
 @router.post("/recipes")
@@ -157,7 +162,7 @@ def create_recipe(body: RecipeIn, db: Session = Depends(get_db)):
     db.add(r)
     _apply_recipe(db, r, body)
     db.commit()
-    return S.recipe(r, _active(db))
+    return S.recipe(r, _active(db), A.get_settings(db))
 
 
 @router.put("/recipes/{recipe_id}")
@@ -167,7 +172,37 @@ def replace_recipe(recipe_id: int, body: RecipeIn, db: Session = Depends(get_db)
         _404()
     _apply_recipe(db, r, body)
     db.commit()
-    return S.recipe(r, _active(db))
+    return S.recipe(r, _active(db), A.get_settings(db))
+
+
+@router.get("/assumptions")
+def get_assumptions(db: Session = Depends(get_db)):
+    return A.summary(db)
+
+
+@router.patch("/assumptions/settings")
+def update_settings(body: dict[str, float], db: Session = Depends(get_db)):
+    try:
+        A.set_settings(db, body)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    db.commit()
+    return A.summary(db)
+
+
+@router.patch("/stages/{stage_id}/assumptions")
+def update_stage_assumptions(stage_id: int, body: dict, db: Session = Depends(get_db)):
+    s = db.get(Stage, stage_id)
+    if not s:
+        _404()
+    for k, v in body.items():
+        if k not in A.ASSUMPTION_FIELDS:
+            raise HTTPException(422, f"Unknown assumption {k}")
+        if k != "assumption_notes" and (not isinstance(v, (int, float)) or v < 0):
+            raise HTTPException(422, f"{k} must be a number of 0 or more")
+    A.apply(db, s, body)
+    db.commit()
+    return A.summary(db)
 
 
 def _404():

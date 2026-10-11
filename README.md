@@ -108,6 +108,27 @@ It's deterministic, so every run tells the same story: Powder coating
 availability and Pressing performance are the weak spots, output vs capacity
 climbs as volume grows, and some BC standard costs are out of date.
 
+## Costing assumptions
+
+Each process / machine has an hourly rate built up on the **Assumptions** page:
+
+| Element | Calculation |
+|---|---|
+| Labour | crew size x labour rate per person-hour (wages + on-costs) |
+| Electricity | machine kW x average load % x electricity price per kWh |
+| Gas | $ per running hour (e.g. cure oven, shielding gas) |
+| Consumables | $ per hour (blades, tips, filters...) |
+| Maintenance | $ per hour |
+| Depreciation | machine cost / useful life (years) / available hours per year |
+| Overhead | $ per hour (rent, supervision, admin share) |
+
+Available hours per year = hours per day x working days per week x working
+weeks per year. Electricity price and working days/weeks are shop-wide
+settings. The rate costs stage time in job actual costs and recipe standard
+costs, and each recipe shows its standard cost split by element (material,
+labour, electricity...). A rate typed directly on the Items page overrides the
+build-up for that stage.
+
 ## OEE and capacity definitions
 
 Per stage and week, from the shop-floor log and issue log:

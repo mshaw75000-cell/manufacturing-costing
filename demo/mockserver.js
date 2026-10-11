@@ -12,7 +12,7 @@
 'use strict';
 (function () {
   const EPS = 1e-9;
-  const KEY = 'mfgcost-demo-v2';
+  const KEY = 'mfgcost-demo-v3';
   const DAY = 86400000;
   const r4 = x => Math.round(x * 1e4) / 1e4;
   const r2 = x => Math.round(x * 100) / 100;
@@ -558,6 +558,47 @@
     return ops.sort((a, b) => b.impact - a.impact);
   }
 
+  // ------------------------------------------------------------------ costing assumptions
+  const ELEMENTS = ['labour', 'electricity', 'gas', 'consumables', 'maintenance', 'depreciation', 'overhead'];
+  const DEFAULT_SETTINGS = { electricity_per_kwh: 0.28, working_days_per_week: 5, working_weeks_per_year: 48 };
+  const SETTING_LABELS = { electricity_per_kwh: 'Electricity price ($ per kWh)', working_days_per_week: 'Working days per week', working_weeks_per_year: 'Working weeks per year' };
+  const ASSUMPTION_FIELDS = ['crew_size', 'labour_rate', 'machine_kw', 'power_load_pct', 'gas_per_hour', 'consumables_per_hour',
+    'maintenance_per_hour', 'machine_cost', 'machine_life_years', 'overhead_per_hour', 'capacity_hours_per_day', 'assumption_notes'];
+  const settings = () => ({ ...DEFAULT_SETTINGS, ...(S.settings || {}) });
+  const annualHours = (s, st) => s.capacity_hours_per_day * st.working_days_per_week * st.working_weeks_per_year;
+  function rateBreakdown(s, st) {
+    const v = k => s[k] || 0, hours = annualHours(s, st);
+    return { labour: v('crew_size') * v('labour_rate'), electricity: v('machine_kw') * v('power_load_pct') / 100 * st.electricity_per_kwh,
+      gas: v('gas_per_hour'), consumables: v('consumables_per_hour'), maintenance: v('maintenance_per_hour'),
+      depreciation: v('machine_cost') && v('machine_life_years') && hours ? v('machine_cost') / v('machine_life_years') / hours : 0,
+      overhead: v('overhead_per_hour') };
+  }
+  const stageElements = (s, st) => (s.rate_from_assumptions ? rateBreakdown(s, st) : { ...Object.fromEntries(ELEMENTS.map(e => [e, 0])), overhead: s.rate_per_hour });
+  const sumVals = o => Object.values(o).reduce((a, b) => a + b, 0);
+  function recomputeRates() { const st = settings(); for (const s of S.stages) if (s.rate_from_assumptions) s.rate_per_hour = r4(sumVals(rateBreakdown(s, st))); }
+  function standardBreakdown(r, active, st) {
+    const out = { material: 0, ...Object.fromEntries(ELEMENTS.map(e => [e, 0])) };
+    if (!r.output_qty) return out;
+    for (const c of r.components) out.material += c.qty_per / r.output_qty * (1 + c.scrap_pct / 100) * componentStdCost(item(c.item_id), active, [r.id]);
+    const batch = r.std_batch_qty || r.output_qty;
+    for (const o of r.operations) {
+      const hours = (o.setup_minutes / batch + o.run_minutes_per_unit) / 60;
+      for (const [k, v] of Object.entries(stageElements(stage(o.stage_id), st))) out[k] += hours * v;
+    }
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, r4(v)]));
+  }
+  function assumptionSummary() {
+    const st = settings();
+    return { settings: st, labels: SETTING_LABELS, elements: ELEMENTS,
+      stages: [...S.stages].sort((a, b) => a.sequence - b.sequence).map(s => {
+        const br = stageElements(s, st), hours = annualHours(s, st);
+        return { id: s.id, code: s.code, name: s.name, color: s.color, sequence: s.sequence, rate_from_assumptions: !!s.rate_from_assumptions,
+          rate_per_hour: s.rate_per_hour, ...Object.fromEntries(ASSUMPTION_FIELDS.map(k => [k, s[k] ?? (k === 'assumption_notes' ? '' : 0)])),
+          breakdown: Object.fromEntries(Object.entries(br).map(([k, v]) => [k, r4(v)])), annual_hours: Math.round(hours * 10) / 10,
+          annual_cost_at_capacity: Math.round(s.rate_per_hour * hours), electricity_kwh_per_hour: r4((s.machine_kw || 0) * (s.power_load_pct || 0) / 100) };
+      }) };
+  }
+
   // ------------------------------------------------------------------ mock BC
   function syncItems() {
     const pending = {};
@@ -619,7 +660,7 @@
         std_batch_qty: r.std_batch_qty, active: r.active, notes: r.notes,
         operations: [...r.operations].sort((a, b) => a.sequence - b.sequence).map(o => ({ ...o, stage_code: stage(o.stage_id).code, stage_name: stage(o.stage_id).name })),
         components: r.components.map(c => { const ci = item(c.item_id); return { ...c, item_no: ci.no, description: ci.description, uom: ci.uom, unit_cost: ci.unit_cost }; }),
-        standard_unit_cost: r4(standardUnitCost(r, activeRecipes())) };
+        standard_unit_cost: r4(standardUnitCost(r, activeRecipes())), standard_breakdown: standardBreakdown(r, activeRecipes(), settings()) };
     },
     demand: d => ({ ...d, item_no: item(d.item_id).no, description: item(d.item_id).description }),
     job: (j, detail) => {
@@ -670,7 +711,25 @@
     if (method === 'PATCH' && (m = path.match(/^\/stages\/(\d+)$/))) {
       const s = stage(+m[1]) || fail(404, 'Not found');
       for (const k of ['name', 'sequence', 'rate_per_hour', 'capacity_hours_per_day', 'color']) if (k in body) s[k] = body[k];
+      if ('rate_per_hour' in body) s.rate_from_assumptions = false; else if (s.rate_from_assumptions) recomputeRates();
       return ser.stage(s);
+    }
+    if (method === 'GET' && path === '/assumptions') return assumptionSummary();
+    if (method === 'PATCH' && path === '/assumptions/settings') {
+      for (const [k, v] of Object.entries(body)) { if (!(k in DEFAULT_SETTINGS)) fail(422, `Unknown setting ${k}`); S.settings = { ...settings(), [k]: +v }; }
+      recomputeRates();
+      return assumptionSummary();
+    }
+    if (method === 'PATCH' && (m = path.match(/^\/stages\/(\d+)\/assumptions$/))) {
+      const s = stage(+m[1]) || fail(404, 'Not found');
+      for (const [k, v] of Object.entries(body)) {
+        if (!ASSUMPTION_FIELDS.includes(k)) fail(422, `Unknown assumption ${k}`);
+        if (k !== 'assumption_notes' && (typeof v !== 'number' || v < 0)) fail(422, `${k} must be a number of 0 or more`);
+        s[k] = v;
+      }
+      if (Object.keys(body).some(k => !['capacity_hours_per_day', 'assumption_notes'].includes(k))) s.rate_from_assumptions = true;
+      if (s.rate_from_assumptions) s.rate_per_hour = r4(sumVals(rateBreakdown(s, settings())));
+      return assumptionSummary();
     }
     if (method === 'GET' && path === '/recipes') return S.recipes.map(ser.recipe);
     if (method === 'GET' && (m = path.match(/^\/recipes\/(\d+)$/))) return ser.recipe(byId('recipes', +m[1]) || fail(404, 'Not found'));

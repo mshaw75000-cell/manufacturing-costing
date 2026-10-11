@@ -25,18 +25,37 @@ from . import clock
 from .bc.mock import MockBusinessCentral
 from .models import (BcPosting, Demand, IssueLog, Item, Job, JobNote, Lot, PurchaseRequest, PurchaseRequestLine,
                      Recipe, RecipeComponent, RecipeOperation, Stage)
+from .services import assumptions as A
 from .services import production as P
 from .services.costing import active_recipes, standard_unit_cost
 from .services.planning import component_qty
 
-# code, name, sequence, rate/h, capacity h/day, color
+# code, name, sequence, capacity h/day, color, costing assumptions (per hour unless stated)
 STAGES = [
-    ("CUT", "Cutting", 10, 85.0, 15.2, "#0ea5e9"),
-    ("PRESS", "Pressing", 20, 110.0, 7.6, "#8b5cf6"),
-    ("WELD", "Welding", 30, 95.0, 22.8, "#f97316"),
-    ("PCOAT", "Powder coating", 40, 120.0, 7.6, "#10b981"),
-    ("ASSY", "Assembly", 50, 75.0, 11.4, "#eab308"),
-    ("PACK", "Inspect & pack", 60, 65.0, 7.6, "#64748b"),
+    ("CUT", "Cutting", 10, 15.2, "#0ea5e9", dict(
+        crew_size=1, labour_rate=52, machine_kw=15, power_load_pct=60, consumables_per_hour=6, maintenance_per_hour=4,
+        machine_cost=180000, machine_life_years=10, overhead_per_hour=16,
+        assumption_notes="Two cells: automatic bandsaw and CNC plasma table. Blades and plasma tips as consumables.")),
+    ("PRESS", "Pressing", 20, 7.6, "#8b5cf6", dict(
+        crew_size=1, labour_rate=55, machine_kw=22, power_load_pct=50, consumables_per_hour=2, maintenance_per_hour=6,
+        machine_cost=260000, machine_life_years=12, overhead_per_hour=30,
+        assumption_notes="100 t CNC press brake, one operator. Tooling wear in maintenance.")),
+    ("WELD", "Welding", 30, 22.8, "#f97316", dict(
+        crew_size=1, labour_rate=58, machine_kw=12, power_load_pct=45, gas_per_hour=6, consumables_per_hour=9,
+        maintenance_per_hour=2, machine_cost=135000, machine_life_years=8, overhead_per_hour=16,
+        assumption_notes="Three MIG cells with fume extraction. Shielding gas as gas; tips, liners and wire-feed parts as consumables.")),
+    ("PCOAT", "Powder coating", 40, 7.6, "#10b981", dict(
+        crew_size=1.5, labour_rate=50, machine_kw=45, power_load_pct=70, gas_per_hour=14, consumables_per_hour=4,
+        maintenance_per_hour=8, machine_cost=420000, machine_life_years=12, overhead_per_hour=22,
+        assumption_notes="Pre-treatment, spray booth, conveyor and gas-fired cure oven. Booth fans and compressor drive the electrical load.")),
+    ("ASSY", "Assembly", 50, 11.4, "#eab308", dict(
+        crew_size=1, labour_rate=48, machine_kw=3, power_load_pct=30, consumables_per_hour=2, maintenance_per_hour=1,
+        machine_cost=20000, machine_life_years=10, overhead_per_hour=14,
+        assumption_notes="Benches, air tools and torque drivers.")),
+    ("PACK", "Inspect & pack", 60, 7.6, "#64748b", dict(
+        crew_size=1, labour_rate=45, machine_kw=2, power_load_pct=30, consumables_per_hour=1.5, maintenance_per_hour=0.5,
+        machine_cost=15000, machine_life_years=10, overhead_per_hour=12,
+        assumption_notes="Final inspection and packing. Cartons are costed as material; stretch wrap and tape here.")),
 ]
 
 V = {"V-1001": ("BlueScope Distribution", 5), "V-1002": ("Orrcon Steel", 7), "V-1003": ("Dulux Powders", 10),
@@ -316,9 +335,10 @@ class _Sim:
     def master_data(self):
         db = self.db
         self.at(self.history_start - timedelta(days=14))
-        for code, name, seq, rate, cap, color in STAGES:
-            s = Stage(code=code, name=name, sequence=seq, rate_per_hour=rate, capacity_hours_per_day=cap, color=color)
+        for code, name, seq, cap, color, assumptions in STAGES:
+            s = Stage(code=code, name=name, sequence=seq, capacity_hours_per_day=cap, color=color)
             db.add(s)
+            A.apply(db, s, assumptions)
             self.stages[code] = s
         for no, desc, uom, cost, vendor, lot, mult in RAW:
             it = Item(no=no, description=desc, item_type="raw", uom=uom, unit_cost=cost, lot_tracked=lot,

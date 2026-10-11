@@ -56,6 +56,20 @@ class Stage(Base):
     # Available hours per working day (shifts x machines/people), for OEE and loading.
     capacity_hours_per_day: Mapped[float] = mapped_column(Float, default=7.6)
     color: Mapped[str] = mapped_column(String(20), default="#64748b")
+    # Costing assumptions. When rate_from_assumptions is set, rate_per_hour is
+    # calculated from these (services/assumptions.py); otherwise it's entered directly.
+    rate_from_assumptions: Mapped[bool] = mapped_column(Boolean, default=False)
+    crew_size: Mapped[float] = mapped_column(Float, default=1.0)
+    labour_rate: Mapped[float] = mapped_column(Float, default=0.0)  # per person-hour incl. on-costs
+    machine_kw: Mapped[float] = mapped_column(Float, default=0.0)  # rated electrical load
+    power_load_pct: Mapped[float] = mapped_column(Float, default=0.0)  # average share of rated load used
+    gas_per_hour: Mapped[float] = mapped_column(Float, default=0.0)
+    consumables_per_hour: Mapped[float] = mapped_column(Float, default=0.0)
+    maintenance_per_hour: Mapped[float] = mapped_column(Float, default=0.0)
+    machine_cost: Mapped[float] = mapped_column(Float, default=0.0)  # capital cost, for depreciation
+    machine_life_years: Mapped[float] = mapped_column(Float, default=0.0)
+    overhead_per_hour: Mapped[float] = mapped_column(Float, default=0.0)  # rent, supervision, admin share
+    assumption_notes: Mapped[str] = mapped_column(Text, default="")
 
 
 class Recipe(Base):
@@ -313,3 +327,10 @@ class PurchaseRequestLine(Base):
     needed_by: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     item: Mapped[Item] = relationship()
+
+
+class Setting(Base):
+    """Shop-wide costing assumptions (electricity price, working weeks...)."""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[float] = mapped_column(Float)

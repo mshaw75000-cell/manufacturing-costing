@@ -11,11 +11,14 @@ def item(i: Item) -> dict:
 
 def stage(s: Stage) -> dict:
     return {"id": s.id, "code": s.code, "name": s.name, "sequence": s.sequence,
-            "rate_per_hour": s.rate_per_hour, "capacity_hours_per_day": s.capacity_hours_per_day, "color": s.color}
+            "rate_per_hour": s.rate_per_hour, "capacity_hours_per_day": s.capacity_hours_per_day, "color": s.color,
+            "rate_from_assumptions": s.rate_from_assumptions}
 
 
-def recipe(r: Recipe, active: dict[int, Recipe] | None = None) -> dict:
+def recipe(r: Recipe, active: dict[int, Recipe] | None = None, settings: dict | None = None) -> dict:
+    from ..services.assumptions import DEFAULT_SETTINGS, standard_breakdown
     return {
+        "standard_breakdown": standard_breakdown(r, active or {}, settings or DEFAULT_SETTINGS),
         "id": r.id, "item_id": r.item_id, "item_no": r.item.no, "item_description": r.item.description,
         "version": r.version, "output_qty": r.output_qty, "std_batch_qty": r.std_batch_qty, "active": r.active, "notes": r.notes,
         "operations": [{"id": o.id, "stage_id": o.stage_id, "stage_code": o.stage.code,
