@@ -8,6 +8,10 @@ Writes:
     published in BC (Web Services page) under the name in BC_ITEM_JOURNAL_SERVICE.
     Lines land in the configured journal batch; posting the batch is done in
     BC (manually, by job queue, or by a small AL extension). See README.
+    Items are on Standard costing, so no unit amount is sent: BC values both
+    consumption and output at the item's standard cost.
+    Lot numbers are NOT sent: lot-tracked items in BC need item tracking lines,
+    which page 40 can't create (see README, "Lots in BC").
 
 Auth: Azure AD (Entra) app registration, OAuth2 client-credentials flow.
 """
@@ -98,8 +102,6 @@ class LiveBusinessCentral:
             "Item_No": line.item_no,
             "Quantity": line.qty,
         }
-        if line.kind == "output":
-            payload["Unit_Amount"] = line.unit_cost
         if self.location_code:
             payload["Location_Code"] = self.location_code
         r = self._http.post(f"{self.odata_base}/{self.journal_service}",

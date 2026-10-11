@@ -15,15 +15,21 @@ material to costed finished goods:
    materials to **buy**, with quantities, need-by dates and shortfall value.
 4. **Jobs and the live shop floor.** Jobs move unit quantities stage by stage
    (*waiting → in process → done*, or *scrapped*). The board updates in real time
-   in every open browser and shows which material is at which stage.
+   in every open browser and shows which material, lot and heat is at which stage.
 5. **Consumption.** Components are backflushed when units start at the stage
-   that uses them. Local stock drops immediately and a consumption posting is
-   queued for BC.
-6. **Costing and output.** A job's cost is the material issued (at BC unit cost)
-   plus time at each stage multiplied by the stage's hourly rate (labour +
-   overhead). Scrap is absorbed by the good units. Finishing a job queues an
-   output posting to BC at the computed unit cost, so the units go into
-   finished goods inventory.
+   that uses them, drawn from lots (the operator's chosen lot, otherwise oldest
+   first). Local stock drops immediately and a consumption posting is queued for BC.
+6. **Output as completed.** As soon as units complete the last stage, they go
+   into stock and an output posting is queued for BC at the item's **standard
+   cost**, into the job's output lot.
+7. **Standard costing and variances.** Actual cost is material at standard plus
+   time at each stage multiplied by its hourly rate. Closing the job freezes
+   actual cost and the variance against what BC booked, broken down by
+   material, stage and standard.
+8. **Lot / heat traceability.** Received lots carry heat number, supplier and
+   mill cert. Every issue records its lot, and every job's output is a lot, so
+   you can trace a finished lot back to the steel heat, or a heat forward to
+   every finished lot it went into.
 
 ```
  BC items/stock/costs ─┐                                  ┌─► BC item journal
@@ -54,9 +60,13 @@ whole cycle without touching your tenant. Demo walk-through:
 2. *Jobs*: open each job and click **Release to floor**.
 3. *Shop floor*: click a card and use **Start** / **Complete** / **Scrap**. Open the
    board in a second window to watch it update live.
-4. When the last stage is complete, click **Finish job**. The unit cost is frozen
-   and the output is queued.
-5. *Business Central*: **Send pending postings**, then **Pull items & stock** to
+   On the cutting stage, pick which steel lot / heat to use. Finished units
+   post to BC as they complete.
+4. When every unit is through, click **Close job** to freeze actual cost and
+   variances. Open the job to see the variance breakdown.
+5. *Lots & trace*: trace the frame's lot back to the steel heat and powder
+   batch, or search a heat number and trace it forward.
+6. *Business Central*: **Send pending postings**, then **Pull items & stock** to
    see BC's inventory and cost updated.
 
 ## Connecting to the real Business Central
@@ -78,8 +88,9 @@ What it reads and writes:
   unit cost, inventory) and `salesOrders` with `salesOrderLines` (outstanding
   quantity, shipment date).
 - **Writes** create item journal lines: consumption as *Negative Adjmt.*,
-  finished output as *Positive Adjmt.* with *Unit Amount* set to the job's unit
-  cost. Lines are created in the journal batch. **Posting the batch is not yet
+  finished output as *Positive Adjmt.*, one line per completion. Items are on
+  **Standard** costing, so no amount is sent: BC values both at standard cost.
+  Lines are created in the journal batch. **Posting the batch is not yet
   automated**: post it in BC, run it from the job queue, or add a small AL
   extension that exposes a post action (recommended next step, see roadmap).
 - Postings go through an **outbox** (`bc_postings` table). The shop floor never
@@ -87,20 +98,46 @@ What it reads and writes:
   offline. When stock is pulled from BC, movements still in the outbox are
   re-applied so on-hand quantities don't jump back.
 
+### Lots in BC
+
+Lot and heat numbers are recorded in this tool and not yet sent to BC. If the
+same items have lot tracking switched on in BC (an item tracking code with lot
+tracking), BC won't post the journal lines without item tracking lines, and
+page 40 can't create those. There are two options to decide on:
+
+1. **Keep lot tracking off in BC** for these items. This tool is the
+   traceability record. Simplest, and it works today.
+2. **Turn it on in BC** and add a small AL extension that accepts a lot no. per
+   journal line and creates the reservation / tracking entry. BC then shows
+   lots too. The `lot_no` is already stored on every posting, ready for this.
+
 > The live client is written against BC's documented APIs but has not yet been
 > run against your tenant. Expect some field-name adjustments on first connection,
 > especially the item journal page fields, which depend on how page 40 is published.
 
-## Costing rules (current)
+## Costing rules (standard costing)
 
-- Material is valued at the item's BC unit cost **at the time of issue**.
-- Conversion cost per stage = (setup minutes, charged once when the stage first
-  starts, + run minutes) / 60 × stage rate per hour. Operators can enter actual
-  minutes on **Complete**; if they leave it blank, standard run minutes are used.
-- Unit cost = (material + conversion) / good units. Scrap cost is spread over
-  the good output.
-- A recipe's **standard cost** rolls sub-assemblies up through their own recipes,
-  for comparison with actual cost.
+- Items are on BC's **Standard** costing method; the BC unit cost is the standard.
+- Material is issued at the component's standard cost; finished units go into
+  stock (and BC) at the output item's standard cost as they complete.
+- Actual conversion cost per stage = (setup minutes, charged once when the
+  stage first starts, + run minutes) / 60 × stage rate per hour. Operators can
+  enter actual minutes on **Complete**; if they leave it blank, standard minutes are used.
+- **Variance** = actual cost − value booked into stock at BC standard, split into:
+  - *material usage*: (actual qty − standard qty for good output) × standard cost.
+    Scrap and over-use show up here.
+  - *labour & overhead*: actual stage cost − standard stage cost for good output.
+  - *recipe vs BC standard*: the recipe's standard compared with BC's. A
+    non-zero figure means the BC standard is out of date with the recipe.
+  Positive = unfavourable.
+- A recipe's **standard cost** uses each component's BC standard (rolling up
+  through the sub-assembly recipe if BC has none) plus standard stage time, with
+  setup spread over the recipe's *standard run size*.
+- **WIP value** = actual cost put into open jobs − output already in stock at standard.
+- Variances are calculated and shown here; they are **not posted to the GL**.
+  How variances should hit the GL (and to which accounts) is a decision for
+  your accountant. Once that's agreed, it can be added as general journal
+  postings.
 
 ## Project layout
 
@@ -108,7 +145,9 @@ What it reads and writes:
 app/
   models.py              data model (items, stages, recipes, demand, jobs, events, BC outbox)
   services/planning.py   MRP explosion and netting
-  services/production.py job flow, backflush, costing, finish
+  services/production.py job flow, lot allocation, backflush, output, close
+  services/costing.py    standard cost roll-up, actual cost, variances
+  services/trace.py      lot genealogy (backward / forward)
   bc/                    BC adapters (mock + live) and sync/outbox
   api/                   REST endpoints + SSE stream (/api/stream)
   seed.py                demo data
@@ -125,10 +164,9 @@ for production.
   MFGCOST batch, or direct item ledger posting via custom API.
 - **Users and roles**: sign-in (Entra ID), with operator, supervisor and planner roles.
   Tablet-friendly operator screen per stage, with barcode/QR scan of job travellers.
-- **Partial output posting**: post finished units to BC as they come off the line
-  rather than at job close.
-- **Lot / heat traceability** for steel and powder batches, and location of WIP
-  (racks, ovens).
+- **Lots in BC**: decide option 1 or 2 under "Lots in BC"; pull lots from BC receipts.
+- **Variance GL posting** once account mapping is agreed.
+- **Location of WIP** (racks, ovens) and lot labels / QR codes.
 - **Capacity and scheduling**: stage capacity, queue time, due-date risk.
 - **Variance reporting**: standard vs actual by job, stage and material; scrap reasons.
 - **Purchasing**: turn "buy" lines into BC purchase requisitions or purchase orders.

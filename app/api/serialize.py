@@ -1,11 +1,11 @@
 from ..models import Demand, Item, Job, Recipe, Stage
-from ..services.production import compute_costs
+from ..services.costing import job_costs, standard_unit_cost
 
 
 def item(i: Item) -> dict:
     return {"id": i.id, "no": i.no, "description": i.description, "item_type": i.item_type,
             "uom": i.uom, "unit_cost": i.unit_cost, "qty_on_hand": i.qty_on_hand,
-            "bc_synced_at": i.bc_synced_at}
+            "lot_tracked": i.lot_tracked, "bc_synced_at": i.bc_synced_at}
 
 
 def stage(s: Stage) -> dict:
@@ -13,25 +13,10 @@ def stage(s: Stage) -> dict:
             "rate_per_hour": s.rate_per_hour, "color": s.color}
 
 
-def standard_unit_cost(r: Recipe, active: dict[int, Recipe], _seen=()) -> float:
-    """Estimated cost per output unit: components (sub-assemblies rolled up
-    through their own recipes, others at BC unit cost) plus stage time at
-    standard minutes, with one setup per batch of output_qty."""
-    material = 0.0
-    for c in r.components:
-        sub = active.get(c.item_id)
-        each = (standard_unit_cost(sub, active, _seen + (r.id,))
-                if sub and sub.id not in _seen else c.item.unit_cost)
-        material += c.qty_per * (1 + c.scrap_pct / 100) * each
-    conversion = sum((o.setup_minutes + o.run_minutes_per_unit * r.output_qty) / 60 * o.stage.rate_per_hour
-                     for o in r.operations)
-    return (material + conversion) / r.output_qty if r.output_qty else 0.0
-
-
 def recipe(r: Recipe, active: dict[int, Recipe] | None = None) -> dict:
     return {
         "id": r.id, "item_id": r.item_id, "item_no": r.item.no, "item_description": r.item.description,
-        "version": r.version, "output_qty": r.output_qty, "active": r.active, "notes": r.notes,
+        "version": r.version, "output_qty": r.output_qty, "std_batch_qty": r.std_batch_qty, "active": r.active, "notes": r.notes,
         "operations": [{"id": o.id, "stage_id": o.stage_id, "stage_code": o.stage.code,
                         "stage_name": o.stage.name, "sequence": o.sequence,
                         "setup_minutes": o.setup_minutes, "run_minutes_per_unit": o.run_minutes_per_unit}
@@ -53,13 +38,11 @@ def demand(d: Demand) -> dict:
 
 def job(j: Job, detail: bool = False) -> dict:
     out = {
-        "id": j.id, "number": j.number, "item_id": j.item_id, "item_no": j.item.no,
+        "id": j.id, "number": j.number, "item_id": j.item_id, "item_no": j.item.no, "recipe_id": j.recipe_id,
         "description": j.item.description, "qty": j.qty, "status": j.status, "due_date": j.due_date,
         "demand_id": j.demand_id, "qty_good": j.qty_good, "qty_scrap": j.qty_scrap,
         "created_at": j.created_at, "completed_at": j.completed_at,
-        "costs": compute_costs(j) if j.status not in ("completed", "posted") else {
-            "material_cost": j.material_cost, "conversion_cost": j.conversion_cost,
-            "total_cost": round(j.material_cost + j.conversion_cost, 4), "unit_cost": j.unit_cost},
+        "costs": j.cost_snapshot if j.status == "completed" and j.cost_snapshot else job_costs(j),
         "operations": [{
             "id": o.id, "sequence": o.sequence, "stage_id": o.stage_id, "stage_code": o.stage.code,
             "stage_name": o.stage.name, "color": o.stage.color,
@@ -70,7 +53,17 @@ def job(j: Job, detail: bool = False) -> dict:
     }
     if detail:
         out["issues"] = [{"item_no": i.item.no, "description": i.item.description, "qty": i.qty,
+                          "lot_id": i.lot_id, "lot_no": i.lot.lot_no if i.lot else "",
+                          "heat_no": i.lot.heat_no if i.lot else "",
                           "uom": i.item.uom, "unit_cost": i.unit_cost, "value": round(i.qty * i.unit_cost, 4),
                           "job_operation_id": i.job_operation_id, "created_at": i.created_at}
                          for i in j.issues]
     return out
+
+
+def lot(l) -> dict:
+    return {"id": l.id, "item_id": l.item_id, "item_no": l.item.no, "description": l.item.description,
+            "uom": l.item.uom, "lot_no": l.lot_no, "heat_no": l.heat_no, "supplier": l.supplier,
+            "cert_ref": l.cert_ref, "source": l.source, "job_id": l.job_id,
+            "qty_received": l.qty_received, "qty_on_hand": l.qty_on_hand, "notes": l.notes,
+            "created_at": l.created_at}

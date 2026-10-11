@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Item, Recipe, RecipeComponent, RecipeOperation, Stage
+from ..services.costing import active_recipes as _active
 from ..services.planning import RecipeCycleError, _low_level_codes
 from . import serialize as S
 
@@ -19,6 +20,7 @@ class ItemIn(BaseModel):
     uom: str = "EA"
     unit_cost: float = 0.0
     qty_on_hand: float = 0.0
+    lot_tracked: bool = False
 
 
 @router.get("/items")
@@ -41,7 +43,7 @@ def update_item(item_id: int, body: dict, db: Session = Depends(get_db)):
     item = db.get(Item, item_id)
     if not item:
         _404()
-    for k in ("description", "item_type", "uom", "unit_cost"):
+    for k in ("description", "item_type", "uom", "unit_cost", "lot_tracked"):
         if k in body:
             setattr(item, k, body[k])
     db.commit()
@@ -99,6 +101,7 @@ class RecipeIn(BaseModel):
     item_id: int
     version: str = "1"
     output_qty: float = Field(1.0, gt=0)
+    std_batch_qty: float | None = Field(None, gt=0)
     active: bool = True
     notes: str = ""
     operations: list[OperationIn]
@@ -114,8 +117,8 @@ def _apply_recipe(db: Session, r: Recipe, body: RecipeIn):
             raise HTTPException(422, f"Component consumed at operation {c.operation_seq}, which doesn't exist")
         if c.item_id == body.item_id:
             raise HTTPException(422, "A recipe can't consume its own output")
-    r.item_id, r.version, r.output_qty, r.active, r.notes = (
-        body.item_id, body.version, body.output_qty, body.active, body.notes)
+    r.item_id, r.version, r.output_qty, r.std_batch_qty, r.active, r.notes = (
+        body.item_id, body.version, body.output_qty, body.std_batch_qty, body.active, body.notes)
     r.operations = [RecipeOperation(**o.model_dump()) for o in body.operations]
     r.components = [RecipeComponent(**c.model_dump()) for c in body.components]
     if body.active:
@@ -131,10 +134,6 @@ def _apply_recipe(db: Session, r: Recipe, body: RecipeIn):
     item = db.get(Item, body.item_id)
     if item.item_type == "raw":
         item.item_type = "sub"
-
-
-def _active(db: Session) -> dict[int, Recipe]:
-    return {r.item_id: r for r in db.scalars(select(Recipe).where(Recipe.active.is_(True)))}
 
 
 @router.get("/recipes")

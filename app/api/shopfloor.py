@@ -12,6 +12,7 @@ from ..db import get_db
 from ..events import broker
 from ..models import Item, Job, Stage, StageEvent
 from ..services import production as P
+from ..services.costing import job_costs
 from . import serialize as S
 
 router = APIRouter(prefix="/api")
@@ -31,6 +32,7 @@ class MoveIn(BaseModel):
     force: bool = False
     from_state: str = "in_process"
     note: str = ""
+    lot_choices: dict[int, int] | None = None  # component item id -> lot id
 
 
 class IssueIn(BaseModel):
@@ -38,6 +40,7 @@ class IssueIn(BaseModel):
     qty: float = Field(gt=0)
     operation_id: int | None = None
     operator: str = ""
+    lot_id: int | None = None
 
 
 def _job(db: Session, job_id: int) -> Job:
@@ -99,7 +102,7 @@ def release(job_id: int, operator: str = "", db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/start")
 def start(job_id: int, body: MoveIn, db: Session = Depends(get_db)):
     job = _job(db, job_id)
-    _run(P.start, db, job, body.operation_id, body.qty, body.operator, body.force)
+    _run(P.start, db, job, body.operation_id, body.qty, body.operator, body.force, body.lot_choices)
     return _commit(db, job)
 
 
@@ -127,7 +130,7 @@ def issue(job_id: int, body: IssueIn, db: Session = Depends(get_db)):
     if not item:
         raise HTTPException(404, "Item not found")
     op = _run(P._op, job, body.operation_id) if body.operation_id else None
-    P.issue_material(db, job, item, body.qty, op, body.operator)
+    _run(P.issue_material, db, job, item, body.qty, op, body.operator, body.lot_id)
     return _commit(db, job)
 
 
@@ -164,8 +167,10 @@ def wip(db: Session = Depends(get_db)):
             col["in_process"] += op.qty_in_process
             materials = {}
             for i in issued_by_op.get(op.id, []):
-                m = materials.setdefault(i.item.no, {"item_no": i.item.no, "description": i.item.description,
-                                                     "qty": 0.0, "uom": i.item.uom})
+                lot = i.lot
+                m = materials.setdefault((i.item.no, i.lot_id), {
+                    "item_no": i.item.no, "description": i.item.description, "qty": 0.0, "uom": i.item.uom,
+                    "lot_no": lot.lot_no if lot else "", "heat_no": lot.heat_no if lot else ""})
                 m["qty"] += i.qty
             col["jobs"].append({
                 "job_id": job.id, "number": job.number, "item_no": job.item.no,
@@ -175,8 +180,10 @@ def wip(db: Session = Depends(get_db)):
                 "qty_done": op.qty_done, "qty_scrap": op.qty_scrap,
                 "materials": list(materials.values()),
             })
-    finished = [{"job_id": j.id, "number": j.number, "item_no": j.item.no, "qty_good": j.qty_good}
-                for j in jobs if j.qty_good > 0]
+    # Every unit is through (done or scrapped): ready to close and freeze costs.
+    finished = [{"job_id": j.id, "number": j.number, "item_no": j.item.no, "qty_good": j.qty_good,
+                 "qty_scrap": j.qty_scrap}
+                for j in jobs if j.status == "in_progress" and P.units_remaining(j) <= P.EPS]
     return {"stages": list(board.values()), "awaiting_finish": finished}
 
 
@@ -185,9 +192,11 @@ def wip_value(db: Session = Depends(get_db)):
     """Value currently tied up in open jobs (material issued + conversion so far)."""
     rows = []
     for job in db.scalars(select(Job).where(Job.status.in_(("released", "in_progress")))):
-        c = P.compute_costs(job)
-        rows.append({"number": job.number, "item_no": job.item.no, **c})
-    return {"jobs": rows, "total": round(sum(r["total_cost"] for r in rows), 2)}
+        c = job_costs(job)
+        # WIP = cost put in so far minus what has already gone to stock at standard
+        rows.append({"number": job.number, "item_no": job.item.no, "total_cost": c["total_cost"],
+                     "output_value": c["bc_value"], "wip": round(c["total_cost"] - c["bc_value"], 4)})
+    return {"jobs": rows, "total": round(sum(r["wip"] for r in rows), 2)}
 
 
 @router.get("/events")

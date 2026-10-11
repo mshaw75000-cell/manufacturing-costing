@@ -56,7 +56,7 @@ def list_postings(status: str | None = None, limit: int = 200, db: Session = Dep
     q = select(BcPosting).order_by(BcPosting.id.desc()).limit(limit)
     if status:
         q = q.where(BcPosting.status == status)
-    return [{"id": p.id, "kind": p.kind, "document_no": p.document_no, "item_no": p.item_no,
+    return [{"id": p.id, "kind": p.kind, "document_no": p.document_no, "item_no": p.item_no, "lot_no": p.lot_no,
              "qty": p.qty, "unit_cost": p.unit_cost, "status": p.status, "attempts": p.attempts,
              "error": p.error, "created_at": p.created_at, "posted_at": p.posted_at}
             for p in db.scalars(q)]

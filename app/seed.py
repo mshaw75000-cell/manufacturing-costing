@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from .bc.sync import get_bc, sync_demand, sync_items
 from .db import Base, SessionLocal, engine
-from .models import Item, Recipe, RecipeComponent, RecipeOperation, Stage
+from .models import Item, Lot, Recipe, RecipeComponent, RecipeOperation, Stage
 
 STAGES = [
     ("CUT", "Cutting", 10, 85.0, "#0ea5e9"),
@@ -32,13 +32,25 @@ def seed():
         st = {s.code: s.id for s in db.scalars(select(Stage))}
         it = {i.no: i.id for i in db.scalars(select(Item))}
 
+        # Steel and powder are lot tracked: heat numbers / powder batches.
+        for no in ("RM-STL-3MM", "RM-PWD-BLK"):
+            db.get(Item, it[no]).lot_tracked = True
+        for no, lot_no, heat, qty, supplier, cert in [
+            ("RM-STL-3MM", "L24-0911", "H-778120", 20, "BlueScope", "MC-55120"),
+            ("RM-STL-3MM", "L24-0930", "H-779455", 20, "BlueScope", "MC-55871"),
+            ("RM-PWD-BLK", "PB-6611", "", 15, "Dulux", "COA-6611"),
+            ("RM-PWD-BLK", "PB-6702", "", 10, "Dulux", "COA-6702"),
+        ]:
+            db.add(Lot(item_id=it[no], lot_no=lot_no, heat_no=heat, supplier=supplier, cert_ref=cert,
+                       qty_received=qty, qty_on_hand=qty))
+
         # Sub-assembly: bracket pressed from sheet, 20 brackets per sheet.
         db.add(Recipe(item_id=it["SA-BRKT-01"], output_qty=20, notes="20 brackets nested per sheet",
                       operations=[RecipeOperation(stage_id=st["CUT"], sequence=10, setup_minutes=15, run_minutes_per_unit=0.5),
                                   RecipeOperation(stage_id=st["PRESS"], sequence=20, setup_minutes=30, run_minutes_per_unit=0.75)],
                       components=[RecipeComponent(item_id=it["RM-STL-3MM"], qty_per=1, scrap_pct=5, operation_seq=10)]))
         # Finished frame: cut tube, weld with 4 brackets, powder coat, assemble.
-        db.add(Recipe(item_id=it["FG-FRAME-01"], output_qty=1,
+        db.add(Recipe(item_id=it["FG-FRAME-01"], output_qty=1, std_batch_qty=24,
                       operations=[RecipeOperation(stage_id=st["CUT"], sequence=10, setup_minutes=10, run_minutes_per_unit=4),
                                   RecipeOperation(stage_id=st["WELD"], sequence=20, setup_minutes=15, run_minutes_per_unit=18),
                                   RecipeOperation(stage_id=st["PCOAT"], sequence=30, setup_minutes=20, run_minutes_per_unit=6),

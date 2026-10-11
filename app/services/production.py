@@ -8,17 +8,20 @@ Flow of units through a job's operations (one per stage):
 Components are backflushed when units *start* at the operation where the
 recipe consumes them, so the material shows up at that stage straight away,
 and the local inventory is reduced with a consumption posting queued for BC.
+Consumption is drawn from the item's lots (the operator's chosen lot first,
+then oldest first), so every issue records the lot / heat it came from.
 
-Cost of a job = material issued (at item unit cost when issued)
-              + conversion (actual minutes x stage rate per hour).
-Unit cost     = total cost / good units, so scrap is absorbed by good output.
+Finished units are posted to BC as they complete the last stage, at the
+output item's standard cost, into the job's output lot (lot no = job number).
+Closing the job freezes actual cost and variances (see costing.py).
 """
 from datetime import date
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import BcPosting, Demand, Job, JobOperation, MaterialIssue, StageEvent, utcnow
+from ..models import BcPosting, Demand, Job, JobOperation, Lot, MaterialIssue, StageEvent, utcnow
+from .costing import active_recipes, job_costs, output_unit_cost, standard_unit_cost
 from .planning import active_recipe, component_qty
 
 EPS = 1e-9
@@ -50,7 +53,8 @@ def create_job(db: Session, item_id: int, qty: float, due_date: date | None = No
     if not recipe.operations:
         raise ProductionError("Recipe has no operations (stages)")
     job = Job(number=_next_job_number(db), item_id=item_id, recipe_id=recipe.id, qty=qty,
-              due_date=due_date, demand_id=demand_id)
+              due_date=due_date, demand_id=demand_id,
+              std_unit_cost=round(standard_unit_cost(recipe, active_recipes(db)), 4))
     for op in recipe.operations:
         job.operations.append(JobOperation(
             stage_id=op.stage_id, sequence=op.sequence,
@@ -85,7 +89,9 @@ def _components_for_op(job: Job, op: JobOperation):
             yield comp
 
 
-def start(db: Session, job: Job, op_id: int, qty: float, operator: str = "", force: bool = False):
+def start(db: Session, job: Job, op_id: int, qty: float, operator: str = "", force: bool = False,
+          lot_choices: dict[int, int] | None = None):
+    """Start units at a stage. lot_choices maps component item id -> preferred lot id."""
     if job.status not in ("released", "in_progress"):
         raise ProductionError(f"Job is {job.status}")
     op = _op(job, op_id)
@@ -107,18 +113,49 @@ def start(db: Session, job: Job, op_id: int, qty: float, operator: str = "", for
         op.actual_minutes += op.setup_minutes
     job.status = "in_progress"
     for comp, q in needs:
-        issue_material(db, job, comp.item, q, op, operator)
+        issue_material(db, job, comp.item, q, op, operator, (lot_choices or {}).get(comp.item_id))
     _log(db, job, op, "start", qty, operator=operator)
 
 
+def allocate_lots(db: Session, item, qty: float, preferred_lot_id: int | None = None):
+    """Split qty across the item's lots: preferred lot first, then oldest first.
+    Returns [(lot or None, qty)]; None covers stock that isn't in any lot."""
+    lots = list(db.scalars(select(Lot).where(Lot.item_id == item.id, Lot.qty_on_hand > EPS)
+                           .order_by(Lot.created_at, Lot.id)))
+    if preferred_lot_id:
+        pref = [l for l in lots if l.id == preferred_lot_id]
+        if not pref:
+            raise ProductionError(f"Lot {preferred_lot_id} has no stock of {item.no}")
+        lots = pref + [l for l in lots if l.id != preferred_lot_id]
+    parts, remaining = [], qty
+    for lot in lots:
+        if remaining <= EPS:
+            break
+        take = min(lot.qty_on_hand, remaining)
+        parts.append((lot, take))
+        remaining -= take
+    if remaining > EPS:
+        parts.append((None, remaining))
+    return parts
+
+
 def issue_material(db: Session, job: Job, item, qty: float, op: JobOperation | None = None,
-                   operator: str = ""):
+                   operator: str = "", preferred_lot_id: int | None = None):
     item.qty_on_hand -= qty
-    job.issues.append(MaterialIssue(item_id=item.id, item=item, qty=qty, unit_cost=item.unit_cost,
-                                    job_operation_id=op.id if op else None))
-    db.add(BcPosting(kind="consumption", job_id=job.id, document_no=job.number,
-                     item_no=item.no, qty=qty, unit_cost=item.unit_cost))
-    _log(db, job, op, "issue", qty, operator=operator, note=f"{item.no} x {qty:g} {item.uom}")
+    for lot, q in allocate_lots(db, item, qty, preferred_lot_id):
+        if lot:
+            lot.qty_on_hand -= q
+        job.issues.append(MaterialIssue(item_id=item.id, item=item, qty=q, unit_cost=item.unit_cost,
+                                        lot_id=lot.id if lot else None, lot=lot,
+                                        job_operation_id=op.id if op else None))
+        db.add(BcPosting(kind="consumption", job_id=job.id, document_no=job.number, item_no=item.no,
+                         lot_no=lot.lot_no if lot else "", qty=q, unit_cost=item.unit_cost))
+        if lot:
+            where = f"lot {lot.lot_no}" + (f", heat {lot.heat_no}" if lot.heat_no else "")
+        else:
+            where = "NO LOT" if item.lot_tracked else ""
+        _log(db, job, op, "issue", q, operator=operator,
+             note=f"{item.no} x {q:g} {item.uom}" + (f" ({where})" if where else ""))
 
 
 def complete(db: Session, job: Job, op_id: int, qty: float, minutes: float | None = None,
@@ -135,9 +172,26 @@ def complete(db: Session, job: Job, op_id: int, qty: float, minutes: float | Non
     if idx + 1 < len(job.operations):
         job.operations[idx + 1].qty_queued += qty
     else:
-        job.qty_good += qty
+        _receive_output(db, job, qty)
     _close_op_if_done(op)
     _log(db, job, op, "complete", qty, minutes=minutes, operator=operator)
+
+
+def _receive_output(db: Session, job: Job, qty: float):
+    """Finished units go straight into stock and are posted to BC at standard cost."""
+    job.qty_good += qty
+    job.item.qty_on_hand += qty
+    lot = db.scalar(select(Lot).where(Lot.item_id == job.item_id, Lot.lot_no == job.number))
+    if not lot:
+        lot = Lot(item_id=job.item_id, lot_no=job.number, source="output", job_id=job.id,
+                  qty_received=0.0, qty_on_hand=0.0)
+        db.add(lot)
+    lot.qty_received += qty
+    lot.qty_on_hand += qty
+    cost = output_unit_cost(job)
+    db.add(BcPosting(kind="output", job_id=job.id, document_no=job.number, item_no=job.item.no,
+                     lot_no=job.number, qty=qty, unit_cost=cost))
+    _log(db, job, None, "output", qty, note=f"{job.item.no} x {qty:g} to stock @ std {cost:.4f}")
 
 
 def scrap(db: Session, job: Job, op_id: int, qty: float, from_state: str = "in_process",
@@ -161,39 +215,36 @@ def _close_op_if_done(op: JobOperation):
         op.completed_at = utcnow()
 
 
-def compute_costs(job: Job) -> dict:
-    material = sum(i.qty * i.unit_cost for i in job.issues)
-    conversion = sum(op.actual_minutes / 60.0 * op.stage.rate_per_hour for op in job.operations)
-    total = material + conversion
-    unit = total / job.qty_good if job.qty_good > EPS else 0.0
-    return {"material_cost": round(material, 4), "conversion_cost": round(conversion, 4),
-            "total_cost": round(total, 4), "unit_cost": round(unit, 4)}
+def units_remaining(job: Job) -> float:
+    return sum(op.qty_queued + op.qty_in_process for op in job.operations)
 
 
 def finish(db: Session, job: Job, operator: str = "") -> Job:
-    """Close the job, freeze its costs and queue the finished goods output to BC."""
+    """Close the job and freeze its actual cost and variances. Output has
+    already been posted to BC as units completed. Units still waiting at a
+    stage are written off as not produced (the job is closed short)."""
     if job.status not in ("released", "in_progress"):
         raise ProductionError(f"Job is {job.status}")
     if any(op.qty_in_process > EPS for op in job.operations):
         raise ProductionError("Units are still in process; complete or scrap them first")
-    if job.qty_good <= EPS:
-        raise ProductionError("No good units have been completed")
-    costs = compute_costs(job)
+    short = units_remaining(job)
+    costs = job_costs(job)
     job.material_cost = costs["material_cost"]
     job.conversion_cost = costs["conversion_cost"]
     job.unit_cost = costs["unit_cost"]
+    job.cost_snapshot = costs
     job.status = "completed"
     job.completed_at = utcnow()
-
-    job.item.qty_on_hand += job.qty_good
-    db.add(BcPosting(kind="output", job_id=job.id, document_no=job.number,
-                     item_no=job.item.no, qty=job.qty_good, unit_cost=job.unit_cost))
+    for op in job.operations:
+        op.qty_queued = 0.0
     if job.demand_id:
         demand = db.get(Demand, job.demand_id)
         if demand and demand.status == "open":
             demand.status = "completed"
-    _log(db, job, None, "finish", job.qty_good, operator=operator,
-         note=f"Unit cost {job.unit_cost:.4f}")
+    note = f"Actual unit cost {job.unit_cost:.4f}, variance {costs['variance']['total']:.2f}"
+    if short > EPS:
+        note += f"; closed short, {short:g} units not started"
+    _log(db, job, None, "finish", job.qty_good, operator=operator, note=note)
     return job
 
 

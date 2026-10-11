@@ -28,6 +28,7 @@ class BcJournalLine:
     qty: float
     unit_cost: float
     posting_date: date
+    lot_no: str = ""
 
 
 class BusinessCentral(Protocol):

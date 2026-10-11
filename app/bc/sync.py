@@ -98,7 +98,7 @@ def process_outbox(db: Session, bc: BusinessCentral, limit: int = 200) -> dict:
         try:
             response = bc.post_journal_line(BcJournalLine(
                 kind=p.kind, document_no=p.document_no, item_no=p.item_no,
-                qty=p.qty, unit_cost=p.unit_cost, posting_date=date.today()))
+                qty=p.qty, unit_cost=p.unit_cost, posting_date=date.today(), lot_no=p.lot_no))
             p.response = json.loads(json.dumps(response, default=str))
             p.status, p.error, p.posted_at = "posted", "", utcnow()
             posted += 1

@@ -8,7 +8,7 @@ there, which is what drives the real-time shop-floor board.
 """
 from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -25,7 +25,11 @@ class Item(Base):
     description: Mapped[str] = mapped_column(String(200), default="")
     item_type: Mapped[str] = mapped_column(String(20), default="raw")  # raw | sub | finished
     uom: Mapped[str] = mapped_column(String(20), default="EA")
+    # BC unit cost. Items use BC's Standard costing method, so this is the standard cost.
     unit_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    # Raw material whose lots / heat numbers must be recorded on receipt and consumption.
+    # Made items (sub-assemblies, finished goods) always get an output lot per job.
+    lot_tracked: Mapped[bool] = mapped_column(Boolean, default=False)
     qty_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
     bc_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -46,6 +50,9 @@ class Recipe(Base):
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
     version: Mapped[str] = mapped_column(String(20), default="1")
     output_qty: Mapped[float] = mapped_column(Float, default=1.0)
+    # Typical run size that setup time is spread over in the standard cost
+    # (None = one setup per output_qty).
+    std_batch_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     notes: Mapped[str] = mapped_column(Text, default="")
 
@@ -110,6 +117,10 @@ class Job(Base):
     material_cost: Mapped[float] = mapped_column(Float, default=0.0)
     conversion_cost: Mapped[float] = mapped_column(Float, default=0.0)
     unit_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    # Recipe standard cost per unit, frozen when the job is created.
+    std_unit_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    # Full cost & variance breakdown, frozen when the job is closed.
+    cost_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -146,8 +157,33 @@ class MaterialIssue(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
     job_operation_id: Mapped[int | None] = mapped_column(ForeignKey("job_operations.id"), nullable=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    lot_id: Mapped[int | None] = mapped_column(ForeignKey("lots.id"), nullable=True)
     qty: Mapped[float] = mapped_column(Float)
     unit_cost: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    item: Mapped[Item] = relationship()
+    lot: Mapped["Lot | None"] = relationship()
+
+
+class Lot(Base):
+    """A lot of an item. Raw material lots are received with their heat number,
+    supplier and mill cert; made items get one output lot per job (lot no = job
+    number). Material issues record which lot was consumed, which gives full
+    genealogy: finished lot -> job -> consumed lots -> their jobs -> ... -> heat."""
+    __tablename__ = "lots"
+    __table_args__ = (UniqueConstraint("item_id", "lot_no"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"))
+    lot_no: Mapped[str] = mapped_column(String(50), index=True)
+    heat_no: Mapped[str] = mapped_column(String(50), default="", index=True)
+    supplier: Mapped[str] = mapped_column(String(100), default="")
+    cert_ref: Mapped[str] = mapped_column(String(100), default="")
+    source: Mapped[str] = mapped_column(String(20), default="receipt")  # receipt | output
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
+    qty_received: Mapped[float] = mapped_column(Float, default=0.0)
+    qty_on_hand: Mapped[float] = mapped_column(Float, default=0.0)
+    notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     item: Mapped[Item] = relationship()
@@ -180,6 +216,7 @@ class BcPosting(Base):
     job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"), nullable=True)
     document_no: Mapped[str] = mapped_column(String(50))
     item_no: Mapped[str] = mapped_column(String(50))
+    lot_no: Mapped[str] = mapped_column(String(50), default="")
     qty: Mapped[float] = mapped_column(Float)
     unit_cost: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | posted | failed
