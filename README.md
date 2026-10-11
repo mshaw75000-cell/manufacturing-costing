@@ -51,7 +51,22 @@ material to costed finished goods:
                                 material at each stage, cost accumulating)
 ```
 
-## Run it
+## Run it on a Windows PC
+
+1. Install **Python 3.11+** from python.org, ticking **"Add python.exe to PATH"**.
+2. On GitHub, **Code -> Download ZIP**, and unzip it (or `git clone` the repo).
+3. Double-click **`start.bat`**. The first run takes a minute to set up and load
+   the trial data; then your browser opens http://localhost:8000. Keep the
+   black window open while you use it; close it to stop.
+
+`reset-trial-data.bat` wipes the data so the next start reloads fresh trial
+data. On a Mac, run `./start.sh` instead.
+
+No install at all: open `demo/phone-demo.html` in Edge or Chrome. It runs the
+same screens on the trial data inside the browser (simulated BC, data kept in
+that browser).
+
+## Run it (developers)
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
